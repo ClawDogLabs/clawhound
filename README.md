@@ -73,10 +73,13 @@ like) are a different modality and out of scope.
 ## Layout
 
 ```
-postprocess/recommend.py   reads promptfoo results, recommends a model, writes the chart
+postprocess/
+  digest.py                one-line-per-test review view of a suite (before you run)
+  recommend.py             reads promptfoo results, recommends a model, writes the chart
 skills/
   eval-discovery/          scope + pain + stakes + your preference tests (human)
   suite-generation/        mine the repo -> draft the promptfoo suite (agent)
+  suite-report/            narrate the digest into a plain-language report (agent)
 docs/eval-design-guide.md  rule -> promptfoo assertion; the two layers
 templates/
   promptfooconfig.yaml     starter config with floor, discriminating, and preference tests
