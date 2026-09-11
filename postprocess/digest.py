@@ -160,8 +160,8 @@ details.cat { border: 1px solid #d7dce4; border-radius: 8px; background: #fff;
 details.cat > summary { font-size: 1.12rem; font-weight: 600; padding: .8rem 1rem;
   cursor: pointer; background: #fbfcfe; }
 details.cat > summary .count { color: #889; font-weight: 500; }
-.cat-desc { color: #667; font-size: .82rem; padding: .1rem 1rem .5rem;
-  margin: 0; border-bottom: 1px solid #eef0f4; }
+.cat-desc { display: block; color: #667; font-weight: 400; font-size: .82rem;
+  margin: .35rem 0 0; }
 .layer { padding: 0 1rem; }
 .layer h3 { font-size: .74rem; text-transform: uppercase; letter-spacing: .05em;
   color: #667; margin: .9rem 0 .3rem; }
@@ -288,12 +288,12 @@ def render_html(config_path, tests, groups, prompt_wrapper, cat_descs=None):
     for cat in sorted(groups):
         n = sum(len(v) for v in groups[cat].values())
         out.append('<details class="cat">')
-        out.append(
-            "<summary>" + esc(cat) + ' <span class="count">(' + str(n) + ")</span></summary>"
-        )
         desc_text = category_desc_text(cat_descs.get(cat))
+        summary = "<summary>" + esc(cat) + ' <span class="count">(' + str(n) + ")</span>"
         if desc_text:
-            out.append('<p class="cat-desc">' + esc(desc_text) + "</p>")
+            summary += '<span class="cat-desc">' + esc(desc_text) + "</span>"
+        summary += "</summary>"
+        out.append(summary)
         for layer in _LAYER_ORDER:
             ts = groups[cat].get(layer)
             if not ts:
