@@ -189,6 +189,10 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, Menlo, monospace;
 .criteria li { margin: .22rem 0; font-size: .86rem; color: #333; }
 .rubric-text { margin: .35rem 0; padding: .5rem .7rem; border-left: 3px solid #cdd3dd;
   color: #333; font-size: .86rem; background: #fafbfc; white-space: pre-wrap; }
+.controls { position: fixed; top: 12px; right: 14px; z-index: 20; display: flex; gap: 6px; }
+.controls button { font: inherit; font-size: .78rem; padding: .35rem .7rem; cursor: pointer;
+  border: 1px solid #cdd3dd; background: #fff; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+.controls button:hover { background: #eef1f6; }
 """
 
 _LAYER_ORDER = ("floor", "discriminating", "unlayered")
@@ -205,7 +209,14 @@ def render_html(config_path, tests, groups, prompt_wrapper):
     out.append('<meta name="viewport" content="width=device-width, initial-scale=1">')
     out.append("<title>Review digest: " + esc(os.path.basename(config_path)) + "</title>")
     out.append("<style>" + _CSS + "</style>")
-    out.append("</head><body><div class=\"wrap\">")
+    out.append("</head><body>")
+    out.append(
+        '<div class="controls">'
+        '<button onclick="cwAll(true)">Expand all</button>'
+        '<button onclick="cwAll(false)">Collapse all</button>'
+        "</div>"
+    )
+    out.append('<div class="wrap">')
 
     out.append("<h1>Review digest</h1>")
     out.append(
@@ -277,7 +288,12 @@ def render_html(config_path, tests, groups, prompt_wrapper):
             out.append("</div>")  # .layer
         out.append("</details>")  # .cat
 
-    out.append("</div></body></html>")
+    out.append("</div>")
+    out.append(
+        "<script>function cwAll(o){"
+        "document.querySelectorAll('details').forEach(function(d){d.open=o;});}</script>"
+    )
+    out.append("</body></html>")
     return "\n".join(out)
 
 
