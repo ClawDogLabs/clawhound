@@ -74,12 +74,11 @@ like) are a different modality and out of scope.
 
 ```
 postprocess/
-  digest.py                one-line-per-test review view of a suite (before you run)
+  digest.py                review view of a suite before you run: terminal one-line-per-test, or --html for a progressive-disclosure page (plain line per test, prompt + grading on expand)
   recommend.py             reads promptfoo results, recommends a model, writes the chart
 skills/
   eval-discovery/          scope + pain + stakes + your preference tests (human)
   suite-generation/        mine the repo -> draft the promptfoo suite (agent)
-  suite-report/            narrate the digest into a plain-language report (agent)
 docs/eval-design-guide.md  rule -> promptfoo assertion; the two layers
 templates/
   promptfooconfig.yaml     starter config with floor, discriminating, and preference tests

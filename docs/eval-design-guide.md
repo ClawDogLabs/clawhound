@@ -38,7 +38,24 @@ which answers "Opus for the math / data services, Haiku for the frontend"
 directly. Mine EACH sub-repo's own CLAUDE.md, docs, and conventions (not just the
 root) so every service is represented and gets its own routing verdict. A
 single-repo project can instead categorize by topic. Either way, no test ships
-without both a layer and a category.
+without a layer, a category, AND a plain summary.
+
+## Plain summary (tag every test, alongside layer and category)
+
+Every test also carries `metadata.plain`: a jargon-free, business-owner-readable
+one-line summary of what the test checks. Not odds notation, not code, not internal
+terms, just plain language a product manager or owner follows. For the
+multiplicative-devig favorite-longshot case, `plain` reads for example "checks the
+model devigs a deep underdog's price correctly instead of overstating its chances."
+A test's metadata therefore reads for example
+`{ layer: floor, category: odds-math, plain: "..." }`. It is REQUIRED, not optional.
+
+`postprocess/digest.py --html` renders a progressive-disclosure page: `metadata.plain`
+is the COLLAPSED, top-level line a PM or owner reads to scan the whole suite, and the
+technical description, the prompt, and the grading are revealed on expand, for an
+engineer. If a test has no `plain`, that top line falls back to the technical
+description (the jargon a non-technical reader cannot follow), so a missing `plain`
+is an incomplete test.
 
 Survey before you mine, and map coverage after. Enumerate every sub-repo / service
 / major code area (nested `.git` dirs, `package.json` / `pyproject`, service folders,

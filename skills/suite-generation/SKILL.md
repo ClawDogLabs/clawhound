@@ -11,14 +11,26 @@ already got burned by are the highest-value tests, and a codebase remembers them
 better than a person does in a meeting.
 
 Output is a **promptfoo config** (`promptfooconfig.yaml`): a `providers` block and
-a `tests` list. Tag EVERY test with BOTH:
+a `tests` list. Tag EVERY test with ALL THREE:
 - `metadata.layer: floor | discriminating` so `postprocess/recommend.py` can split
-  the must-pass floor from the graded layer, and
+  the must-pass floor from the graded layer,
 - `metadata.category: <topic-or-service>` so recommend.py can do per-category
-  routing (the cheapest model that clears the bar within each category).
+  routing (the cheapest model that clears the bar within each category), and
+- `metadata.plain: <one line>` a jargon-free, business-owner-readable one-line
+  summary of what the test checks, in plain language a product manager or owner
+  understands (no odds notation, no code, no internal terms). This is REQUIRED on
+  every test, not optional.
 
-So a test's metadata reads for example `{ layer: floor, category: odds-math }`.
+So a test's metadata reads for example
+`{ layer: floor, category: odds-math, plain: "checks the model devigs a deep underdog's price correctly instead of overstating its chances" }`.
 Start from `templates/promptfooconfig.yaml`.
+
+`postprocess/digest.py --html` renders `metadata.plain` as the COLLAPSED,
+top-level line a PM or owner reads to scan the whole suite, and reveals the
+technical description, the prompt, and the grading on expand, for an engineer. A
+test with no `plain` falls back to its technical description in that top line,
+which is exactly the jargon a non-technical reader cannot follow, so treat a
+missing `plain` as an incomplete test.
 
 ## Step 0: SURVEY the whole tree first (mandatory, before any mining)
 
