@@ -84,6 +84,27 @@ def rec_layer(r):
     return None
 
 
+def rec_category(r):
+    """Read a test's category the same defensive way rec_layer reads its layer.
+
+    Order: testCase.metadata.category, then metadata.category, then
+    vars.category. Returns None when nothing tags a category; callers label a
+    None-category test "uncategorized". The `categorized` flag (any test with a
+    non-None category) is what decides whether per-category routing runs at all.
+    """
+    for holder in (r.get("testCase"), r, {"metadata": {"category": None}}):
+        if isinstance(holder, dict):
+            meta = holder.get("metadata")
+            if isinstance(meta, dict) and meta.get("category"):
+                return str(meta["category"]).lower()
+    v = r.get("vars")
+    if isinstance(v, dict):
+        cat = v.get("category")
+        if cat:
+            return str(cat).lower()
+    return None
+
+
 def rec_test_key(r):
     """Identify a test ACROSS models, defensively.
 
@@ -267,6 +288,49 @@ def recommend(agg, bar, disc_bar):
 
 
 # ----------------------------------------------------------------------------
+# Per-category routing: split the records by category, aggregate each category
+# with the SAME rules as the overall aggregate, then pick the cheapest model
+# that clears the bar WITHIN each category. The result is a routing policy:
+# category -> model (Opus for the hard categories, a cheap model for the easy
+# ones). For a multi-repo project each service is a category, so this is
+# per-service model routing.
+# ----------------------------------------------------------------------------
+
+def aggregate_by_category(records):
+    """Return {category: per-model-aggregate} plus whether anything is categorized.
+
+    Groups records by rec_category (None -> "uncategorized"), then reuses
+    aggregate() on each group so floor pass-rate, discriminating mean, and cost
+    per test are computed by identical rules to the overall view.
+    """
+    categorized = any(rec_category(r) is not None for r in records)
+    groups = {}
+    for r in records:
+        cat = rec_category(r) or "uncategorized"
+        groups.setdefault(cat, []).append(r)
+    out = {}
+    for cat, recs in groups.items():
+        agg, _layered = aggregate(recs)
+        out[cat] = agg
+    return out, categorized
+
+
+def route_by_category(cat_aggs, bar, disc_bar):
+    """category -> (recommended model or None, its cost_per_test or None).
+
+    Reuses recommend() so each category uses the same bar / disc_bar selection
+    logic as the overall recommendation. A None model means no model cleared the
+    bar within that category.
+    """
+    routing = {}
+    for cat, agg in cat_aggs.items():
+        rec = recommend(agg, bar, disc_bar)
+        cpt = agg[rec]["cost_per_test"] if (rec and rec in agg) else None
+        routing[cat] = (rec, cpt)
+    return routing
+
+
+# ----------------------------------------------------------------------------
 # Text report
 # ----------------------------------------------------------------------------
 
@@ -353,6 +417,42 @@ def print_health(tests, layered):
     for test in saturated:
         print('SATURATED: discriminating test "{}" - all models passed, so it '
               'gives no ranking signal. Harden or retire it.'.format(test))
+
+
+def print_routing(cat_aggs, categorized, bar, disc_bar):
+    print()
+    title = "Per-category routing"
+    print(title)
+    print("-" * len(title))
+    if not categorized:
+        print("No test carried a category, so per-category routing is absent. "
+              "Tag tests with metadata.category to enable it.")
+        return
+    routing = route_by_category(cat_aggs, bar, disc_bar)
+    cats = sorted(routing)
+    cat_w = max([len("category")] + [len(c) for c in cats]) + 2
+    mdl_w = max([len("model")]
+                + [len(m) for m, _ in routing.values() if m]) + 2
+    header = "{:<{cw}} {:<{mw}} {:>14}".format(
+        "category", "model", "cost/test", cw=cat_w, mw=mdl_w)
+    print(header)
+    print("-" * len(header))
+    for c in cats:
+        model, cpt = routing[c]
+        if model is None:
+            print("{:<{cw}} {:<{mw}} {:>14}".format(
+                c, "NO MODEL CLEARS THE BAR", "-", cw=cat_w, mw=mdl_w))
+        else:
+            print("{:<{cw}} {:<{mw}} {:>14}".format(
+                c, model, fmt_cost(cpt), cw=cat_w, mw=mdl_w))
+    print()
+    print("Routing policy: send each category to the model shown ({}floor >= {:.0f}%{})."
+          .format("cheapest that clears the bar, ", bar * 100,
+                  "" if disc_bar <= 0 else ", disc >= {:.2f}".format(disc_bar)))
+    unmet = [c for c in cats if routing[c][0] is None]
+    if unmet:
+        print("No model clears the bar in: {}. Raise coverage, lower the bar, "
+              "or add a stronger model for these.".format(", ".join(unmet)))
 
 
 # ----------------------------------------------------------------------------
@@ -488,7 +588,45 @@ def _health_html(tests, layered):
     return "".join(parts)
 
 
-def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None):
+def _routing_html(cat_aggs, categorized, bar, disc_bar):
+    parts = ['<h2 style="font-size:15px;color:#333">Per-category routing</h2>']
+    if not categorized:
+        parts.append('<p style="color:#8a6d00;font-size:13px">No test carried a '
+                     'category, so per-category routing is absent. Tag tests with '
+                     'metadata.category to enable it.</p>')
+        return "".join(parts)
+    routing = route_by_category(cat_aggs, bar, disc_bar)
+    parts.append('<p style="font-size:13px;color:#333">Send each category to the '
+                 'cheapest model that clears the bar within it.</p>')
+    parts.append('<table style="border-collapse:collapse;font-size:13px;margin:8px 0">'
+                 '<thead><tr>'
+                 '<th style="text-align:left;padding:4px 12px 4px 0;border-bottom:1px solid #ddd">category</th>'
+                 '<th style="text-align:left;padding:4px 12px 4px 0;border-bottom:1px solid #ddd">recommended model</th>'
+                 '<th style="text-align:right;padding:4px 0;border-bottom:1px solid #ddd">cost/test</th>'
+                 '</tr></thead><tbody>')
+    for c in sorted(routing):
+        model, cpt = routing[c]
+        if model is None:
+            cell = ('<td style="padding:4px 12px 4px 0;color:#b35900;font-weight:600">'
+                    'NO MODEL CLEARS THE BAR</td>'
+                    '<td style="padding:4px 0;text-align:right;color:#b35900">-</td>')
+        else:
+            cell = ('<td style="padding:4px 12px 4px 0">{m}</td>'
+                    '<td style="padding:4px 0;text-align:right">{c}</td>').format(
+                        m=html.escape(model), c=html.escape(fmt_cost(cpt)))
+        parts.append('<tr><td style="padding:4px 12px 4px 0">{cat}</td>{cell}</tr>'.format(
+            cat=html.escape(c), cell=cell))
+    parts.append("</tbody></table>")
+    unmet = [c for c in sorted(routing) if routing[c][0] is None]
+    if unmet:
+        parts.append('<p style="color:#b35900;font-size:13px">No model clears the '
+                     'bar in: {}. Raise coverage, lower the bar, or add a stronger '
+                     'model for these.</p>'.format(html.escape(", ".join(unmet))))
+    return "".join(parts)
+
+
+def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None,
+                cat_aggs=None, categorized=False):
     rec_line = ("Run <b>{}</b>, the cheapest model that clears the bar.".format(
         html.escape(rec_model_id)) if rec_model_id
         else "No model clears the bar (floor pass-rate at or above {:.0f}%).".format(bar * 100))
@@ -499,6 +637,8 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
     passbars = _bars(agg, "floor_rate", "Floor pass-rate", fmt_rate, maxval=1.0)
     costbars = _bars(agg, "cost_per_test", "Cost per test", fmt_cost)
     health = _health_html(tests if tests is not None else {}, layered)
+    routing = _routing_html(cat_aggs if cat_aggs is not None else {}, categorized,
+                            bar, disc_bar)
     return """<!doctype html>
 <html><head><meta charset="utf-8"><title>clawhound model recommendation</title></head>
 <body style="font-family:system-ui,sans-serif;max-width:820px;margin:32px auto;color:#111">
@@ -509,11 +649,12 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
 {frontier}
 {passbars}
 {costbars}
+{routing}
 {health}
 <p style="color:#777;font-size:12px;margin-top:24px">Bar: floor pass-rate at or above {barp:.0f}%{db}. Generated by clawhound from a promptfoo results file.</p>
 </body></html>""".format(
         rec=rec_line, note=note, frontier=frontier, passbars=passbars, costbars=costbars,
-        health=health, barp=bar * 100,
+        routing=routing, health=health, barp=bar * 100,
         db="" if disc_bar <= 0 else ", disc score at or above {:.2f}".format(disc_bar))
 
 
@@ -523,28 +664,35 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
 # ----------------------------------------------------------------------------
 
 def _sample_records():
-    def rec(model, test, layer, success, score, cost):
+    def rec(model, test, layer, success, score, cost, category):
         return {
             "provider": {"id": model},
-            "testCase": {"description": test, "metadata": {"layer": layer}},
+            "testCase": {"description": test,
+                         "metadata": {"layer": layer, "category": category}},
             "success": success,
             "score": score,
             "cost": cost,
         }
 
     recs = []
+    # --- category "math": a floor test only the EXPENSIVE model clears --------
     # A floor test EVERY model passes: this is the alarm working, must NOT flag.
-    recs.append(rec("anthropic:opus", "odds axiom deflate/inflate", "floor", True, 1.0, 0.02))
-    recs.append(rec("anthropic:haiku", "odds axiom deflate/inflate", "floor", True, 1.0, 0.002))
-    # A floor test one model FAILS: regression / coverage gap flag.
-    recs.append(rec("anthropic:opus", "never fabricate a score", "floor", True, 1.0, 0.02))
-    recs.append(rec("anthropic:haiku", "never fabricate a score", "floor", False, 0.0, 0.002))
+    recs.append(rec("anthropic:opus", "odds axiom deflate/inflate", "floor", True, 1.0, 0.02, "math"))
+    recs.append(rec("anthropic:haiku", "odds axiom deflate/inflate", "floor", True, 1.0, 0.002, "math"))
+    # A floor test one model FAILS: regression / coverage gap flag. Because haiku
+    # fails a math floor test, only opus clears the bar in "math" -> math routes opus.
+    recs.append(rec("anthropic:opus", "never fabricate a score", "floor", True, 1.0, 0.02, "math"))
+    recs.append(rec("anthropic:haiku", "never fabricate a score", "floor", False, 0.0, 0.002, "math"))
+    # --- category "frontend": both clear, so the CHEAP model wins on cost -----
+    recs.append(rec("anthropic:opus", "tailwind slate palette copy", "floor", True, 1.0, 0.02, "frontend"))
+    recs.append(rec("anthropic:haiku", "tailwind slate palette copy", "floor", True, 1.0, 0.002, "frontend"))
+    # --- category "theory": discriminating-only, so nobody has a floor bar ----
     # A discriminating test EVERY model passes (score >= 0.5): saturated flag.
-    recs.append(rec("anthropic:opus", "diagnose devig longshot bias", "discriminating", True, 0.85, 0.02))
-    recs.append(rec("anthropic:haiku", "diagnose devig longshot bias", "discriminating", True, 0.72, 0.002))
+    recs.append(rec("anthropic:opus", "diagnose devig longshot bias", "discriminating", True, 0.85, 0.02, "theory"))
+    recs.append(rec("anthropic:haiku", "diagnose devig longshot bias", "discriminating", True, 0.72, 0.002, "theory"))
     # A discriminating test that still SPLITS the models: healthy, must NOT flag.
-    recs.append(rec("anthropic:opus", "raw CLV does not prove edge", "discriminating", True, 0.78, 0.02))
-    recs.append(rec("anthropic:haiku", "raw CLV does not prove edge", "discriminating", False, 0.30, 0.002))
+    recs.append(rec("anthropic:opus", "raw CLV does not prove edge", "discriminating", True, 0.78, 0.02, "theory"))
+    recs.append(rec("anthropic:haiku", "raw CLV does not prove edge", "discriminating", False, 0.30, 0.002, "theory"))
     return recs
 
 
@@ -552,8 +700,10 @@ def _selftest():
     records = _sample_records()
     agg, layered = aggregate(records)
     tests = aggregate_tests(records)
+    cat_aggs, categorized = aggregate_by_category(records)
     rec = recommend(agg, 1.0, 0.0)
     print_report(agg, layered, 1.0, 0.0, rec, "anthropic:opus")
+    print_routing(cat_aggs, categorized, 1.0, 0.0)
     print_health(tests, layered)
 
     saturated, regressions = suite_health(tests)
@@ -564,10 +714,25 @@ def _selftest():
     assert ("anthropic:haiku", "never fabricate a score") in regressions, regressions
     # the all-pass floor test must not appear as a regression
     assert all(t != "odds axiom deflate/inflate" for _, t in regressions), regressions
-    # HTML report must carry the block too
-    doc = render_html(agg, layered, 1.0, 0.0, rec, "anthropic:opus", tests)
+
+    # Per-category routing: different models win in different categories.
+    assert categorized, "sample records should be categorized"
+    routing = route_by_category(cat_aggs, 1.0, 0.0)
+    # math: haiku fails a floor test there, so only the expensive opus clears.
+    assert routing["math"][0] == "anthropic:opus", routing
+    # frontend: both clear the floor, so the cheapest model (haiku) is chosen.
+    assert routing["frontend"][0] == "anthropic:haiku", routing
+    # frontend cost must be haiku's cheaper per-test cost, not opus's.
+    assert routing["frontend"][1] == 0.002, routing
+    # theory: discriminating-only, no floor bar to clear, so nobody is routed.
+    assert routing["theory"][0] is None, routing
+    # HTML report must carry both the suite-health and the routing block.
+    doc = render_html(agg, layered, 1.0, 0.0, rec, "anthropic:opus", tests,
+                      cat_aggs, categorized)
     assert "Suite health" in doc, "suite-health block missing from HTML"
     assert "diagnose devig longshot bias" in doc, "saturated test missing from HTML"
+    assert "Per-category routing" in doc, "routing block missing from HTML"
+    assert "NO MODEL CLEARS THE BAR" in doc, "no-clear marking missing from HTML"
     print("\nselftest: OK")
 
 
@@ -600,13 +765,15 @@ def main():
 
     agg, layered = aggregate(records)
     tests = aggregate_tests(records)
+    cat_aggs, categorized = aggregate_by_category(records)
     rec = recommend(agg, args.bar, args.disc_bar)
     print_report(agg, layered, args.bar, args.disc_bar, rec, args.incumbent)
+    print_routing(cat_aggs, categorized, args.bar, args.disc_bar)
     print_health(tests, layered)
 
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(render_html(agg, layered, args.bar, args.disc_bar, rec,
-                            args.incumbent, tests))
+                            args.incumbent, tests, cat_aggs, categorized))
     print("\nHTML report: " + args.out)
 
 

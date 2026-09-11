@@ -11,15 +11,36 @@ already got burned by are the highest-value tests, and a codebase remembers them
 better than a person does in a meeting.
 
 Output is a **promptfoo config** (`promptfooconfig.yaml`): a `providers` block and
-a `tests` list, each test tagged `metadata.layer: floor | discriminating` so
-`postprocess/recommend.py` can split the must-pass floor from the graded layer.
+a `tests` list. Tag EVERY test with BOTH:
+- `metadata.layer: floor | discriminating` so `postprocess/recommend.py` can split
+  the must-pass floor from the graded layer, and
+- `metadata.category: <topic-or-service>` so recommend.py can do per-category
+  routing (the cheapest model that clears the bar within each category).
+
+So a test's metadata reads for example `{ layer: floor, category: odds-math }`.
 Start from `templates/promptfooconfig.yaml`.
+
+### Category = service, in a multi-repo project
+
+For a MULTI-REPO project, each sub-repo or service is its own category. On EV
+Blacksite that is `blackwire` = data, `relay` = api, `visor` = frontend,
+`recalibrator` = a specific service. Then per-category routing becomes per-SERVICE
+model routing, which is what answers the real buyer question: "Opus for the
+math / data services, Haiku for the frontend." A single-repo project can instead
+categorize by topic (odds-math, guardrails, devig-theory, etc.); either way every
+test carries a category.
 
 ## What to read (per in-scope repo)
 
 - `CLAUDE.md` / `AGENTS.md` / contributor docs: architecture rules, invariants, axioms, house style.
 - Memory / gotcha notes, changelogs, and post-incident writeups: the hard-won rules and the bugs that already bit.
 - Domain rules and formulas, style guides, and existing tests.
+
+**Mine EACH sub-repo's own record, not just the root.** In a multi-repo project
+every service has its own `CLAUDE.md`, docs, and conventions. Read each one so
+every service is represented in the suite (and therefore gets its own category and
+its own routing verdict). A root-only mine leaves whole services untested and
+unroutable.
 
 ## Two layers, mapped to promptfoo assertions
 

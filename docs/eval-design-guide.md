@@ -22,6 +22,24 @@ A suite is not one flat list. Tag every test `metadata.layer`:
 `postprocess/recommend.py` reads these tags: floor pass-rate is the gate,
 discriminating score ranks and can be a second gate.
 
+## Category (tag every test, alongside layer)
+
+Layer is not the only tag. Tag every test with `metadata.category` IN ADDITION to
+`metadata.layer`, so a test's metadata reads for example
+`{ layer: floor, category: odds-math }`. recommend.py aggregates per category and
+prints a "Per-category routing" table: the cheapest model that clears the bar
+WITHIN each category. One model rarely wins everywhere, so routing lets you send
+the hard categories to a strong model and the easy ones to a cheap one.
+
+For a MULTI-REPO project, make each sub-repo or service its own category. On EV
+Blacksite: `blackwire` = data, `relay` = api, `visor` = frontend, `recalibrator`
+= a specific service. Per-category routing then becomes per-SERVICE model routing,
+which answers "Opus for the math / data services, Haiku for the frontend"
+directly. Mine EACH sub-repo's own CLAUDE.md, docs, and conventions (not just the
+root) so every service is represented and gets its own routing verdict. A
+single-repo project can instead categorize by topic. Either way, no test ships
+without both a layer and a category.
+
 ## Rule to assertion
 
 | The expectation | promptfoo assertion |
@@ -69,7 +87,10 @@ cheaper model already clears the same bar.
 ## Note on layer tags
 
 recommend.py reads the layer from `testCase.metadata.layer` with fallbacks to
-`metadata.layer` and `vars.layer`. If a promptfoo version does not surface test
-metadata in its results file, the layers collapse and recommend.py treats every
-test as floor for the pass-rate and every score as discriminating, and says so.
-Confirm the tags survive on your first live run.
+`metadata.layer` and `vars.layer`, and the category the same way from
+`testCase.metadata.category` (fallbacks `metadata.category`, `vars.category`). If a
+promptfoo version does not surface test metadata in its results file, the layers
+collapse and recommend.py treats every test as floor for the pass-rate and every
+score as discriminating, and says so; likewise if no test carries a category the
+per-category routing section is skipped and noted as absent. Confirm the tags
+survive on your first live run.
