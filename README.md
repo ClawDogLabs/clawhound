@@ -39,6 +39,9 @@ npm install -g promptfoo        # or use: npx promptfoo@latest
 # 2. Build a suite: run the suite-generation skill against your repo, or start
 #    from templates/promptfooconfig.yaml and add your preference tests.
 
+# 2b. Review the draft before spending a token, one scannable line per test:
+python postprocess/digest.py path/to/promptfooconfig.yaml
+
 # 3. Put your keys in a .env next to the config (gitignored):
 #    ANTHROPIC_API_KEY=...   OPENAI_API_KEY=...   GEMINI_API_KEY=...
 

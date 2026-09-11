@@ -119,9 +119,11 @@ the matrix rank models; a suite of only floor cases saturates and ranks nothing.
 - **Mining only finds what is written down.** Tacit expectations live only in the
   human's head. That is the eval-discovery skill's preference-tests step, not this
   one.
-- **Human review is mandatory.** Emit the config, then have the human read the case
-  list, cut the noise, and correct any rule you misread. Never present a mined
-  suite as final.
+- **Human review is mandatory.** Emit the config, then have the human review it with
+  `postprocess/digest.py` (one scannable line per test: the rule and, for deterministic
+  asserts, the expected value, grouped by category). In one pass they confirm each
+  service tests the right set, check the floor math, and spot what is MISSING, then cut
+  noise and correct any rule you misread. Never present a mined suite as final.
 
 ## Augment an existing suite (do not regenerate)
 
