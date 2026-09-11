@@ -55,6 +55,31 @@ the matrix rank models; a suite of only floor cases saturates and ranks nothing.
   list, cut the noise, and correct any rule you misread. Never present a mined
   suite as final.
 
+## Augment an existing suite (do not regenerate)
+
+Fresh generation is the default, but only when the target repo has NO suite yet.
+When a suite already exists, switch modes: augment it, never rewrite it.
+
+1. **Read the existing suite first.** Load the project's `promptfooconfig.yaml` (and
+   any committed baseline) before mining. You are extending a living artifact, not
+   starting from a blank file.
+2. **Mine as usual**, then diff against what is already covered.
+3. **Propose ONLY net-new cases.** Dedupe by what each test COVERS, not by exact
+   text: a new case that checks the same rule, gotcha, or reasoning as an existing
+   one is a duplicate even when the prompt is worded differently. Drop it. A case
+   earns its place only if it covers a rule the current suite does not.
+4. **Never rewrite or remove existing tests, and never touch the committed
+   baseline.** No edits to existing prompts, asserts, layers, or thresholds. If you
+   believe an existing case is wrong or weak, say so in the report and leave it for
+   the human to change; do not change it yourself.
+5. **Hand the human only the additions.** Emit the net-new cases as a separate list
+   (ready to paste into the existing `tests:` block), tagged by layer like any other
+   case, with the source each came from. The human reviews and merges.
+
+If you are unsure whether a suite exists, check for `promptfooconfig.yaml` in the
+project folder before choosing a mode. Suite present -> augment. Suite absent ->
+fresh generation.
+
 ## Finish
 
 Write `promptfooconfig.yaml` into the client's private suites location (one folder

@@ -8,6 +8,13 @@ bar, and what does it cost. It prints a ranked table and a recommendation, and
 writes a self-contained HTML report whose centerpiece is a cost-vs-quality
 frontier (inline SVG, no external libraries, opens in any browser).
 
+Alongside the per-model view it prints a per-TEST "Suite health" view (also in
+the HTML report), which turns the matrix on its side to grade the TESTS: a
+DISCRIMINATING test every model passed no longer ranks anything (flagged
+saturated, harden or retire), and a FLOOR test any model failed is the
+regression alarm firing (flagged as a regression or coverage gap). A floor test
+that all models pass is the alarm working and is never flagged.
+
 Two layers of tests are expected (see docs/eval-design-guide.md):
   floor          deterministic must-pass tests. Scored by promptfoo `success`
                  (boolean). The bar is a pass-rate you must clear (default 1.0).
@@ -26,6 +33,7 @@ is defensive; validation against a live promptfoo run is still pending.
 Usage:
   python recommend.py results.json [--bar 1.0] [--disc-bar 0.0]
                        [--incumbent provider:model] [--out report.html]
+  python recommend.py --selftest   # run the built-in sample-results test
 """
 
 import argparse
@@ -74,6 +82,35 @@ def rec_layer(r):
         if lay:
             return str(lay).lower()
     return None
+
+
+def rec_test_key(r):
+    """Identify a test ACROSS models, defensively.
+
+    A promptfoo result carries the same test under every provider, so to build a
+    per-test view we need a stable key that is identical across providers. Try, in
+    order: the test description, an explicit metadata id, promptfoo's testIdx, and
+    finally a fingerprint of the test vars. Never raises on a missing field.
+    """
+    tc = r.get("testCase") if isinstance(r.get("testCase"), dict) else {}
+    desc = tc.get("description") or r.get("description")
+    if desc:
+        return str(desc)
+    for holder in (tc, r):
+        if isinstance(holder, dict):
+            meta = holder.get("metadata")
+            if isinstance(meta, dict) and meta.get("id"):
+                return str(meta["id"])
+    idx = r.get("testIdx")
+    if idx is not None:
+        return "test#" + str(idx)
+    v = tc.get("vars") or r.get("vars")
+    if isinstance(v, dict) and v:
+        try:
+            return "vars:" + json.dumps(v, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return "vars:" + str(sorted(v.items()))
+    return "unknown-test"
 
 
 def rec_cost(r):
@@ -136,6 +173,73 @@ def aggregate(records):
             "n": a["n"],
         }
     return out, layered
+
+
+# ----------------------------------------------------------------------------
+# Aggregate per test (across models): the "suite health" view. The per-model
+# aggregate answers "which model to run"; this answers "which of my TESTS are
+# still doing their job." A discriminating test every model passes has stopped
+# ranking anything; a floor test any model fails is the regression alarm firing.
+# ----------------------------------------------------------------------------
+
+def aggregate_tests(records):
+    """Group records by test and count how many models passed each.
+
+    Pass is layer-dependent: floor tests use the promptfoo `success` boolean;
+    discriminating tests use `score` >= 0.5. Untagged tests fall back to
+    `success` and are left out of both health flags (layer stays None), which
+    preserves the untagged-layers fallback: no misleading saturation/regression
+    calls when nothing tagged the layers.
+    """
+    tests = {}
+    for r in records:
+        key = rec_test_key(r)
+        layer = rec_layer(r)
+        t = tests.setdefault(key, {
+            "layer": layer,
+            "n_models": 0,
+            "n_passed": 0,
+            "failed_models": [],
+        })
+        if t["layer"] is None and layer is not None:
+            t["layer"] = layer
+        t["n_models"] += 1
+        model = rec_model(r)
+        score = r.get("score")
+        if layer == "discriminating":
+            passed = isinstance(score, (int, float)) and float(score) >= 0.5
+        else:
+            # floor, or untagged: the deterministic must-pass boolean
+            passed = bool(r.get("success"))
+        if passed:
+            t["n_passed"] += 1
+        else:
+            t["failed_models"].append(model)
+    return tests
+
+
+def suite_health(tests):
+    """Return (saturated, regressions) from the per-test aggregate.
+
+    saturated   list of discriminating test keys that EVERY model passed. These
+                no longer rank anything, so they should be hardened or retired.
+    regressions list of (model, test key) where a FLOOR test failed for a model.
+                A floor test all models pass is NOT a problem (that is the alarm
+                working), so floor tests are never flagged for saturation.
+    """
+    saturated = []
+    regressions = []
+    for key, t in tests.items():
+        layer = t["layer"]
+        if layer == "discriminating":
+            if t["n_models"] > 0 and t["n_passed"] == t["n_models"]:
+                saturated.append(key)
+        elif layer == "floor":
+            for m in t["failed_models"]:
+                regressions.append((m, key))
+    saturated.sort()
+    regressions.sort()
+    return saturated, regressions
 
 
 # ----------------------------------------------------------------------------
@@ -227,6 +331,28 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent):
             save = (1 - rec / inc) * 100
             print("Versus your current {}: about {:.0f}% cheaper per test at or above your bar."
                   .format(incumbent, save))
+
+
+def print_health(tests, layered):
+    print()
+    title = "Suite health"
+    print(title)
+    print("-" * len(title))
+    if not layered:
+        print("Tests were not tagged by layer, so no saturation / regression "
+              "checks were run (they need floor / discriminating tags).")
+        return
+    saturated, regressions = suite_health(tests)
+    if not saturated and not regressions:
+        print("No issues: no saturated discriminating tests, and every model "
+              "cleared every floor test.")
+        return
+    for m, test in regressions:
+        print('FLOOR FAIL: model {} failed "{}": regression or coverage gap.'
+              .format(m, test))
+    for test in saturated:
+        print('SATURATED: discriminating test "{}" - all models passed, so it '
+              'gives no ranking signal. Harden or retire it.'.format(test))
 
 
 # ----------------------------------------------------------------------------
@@ -330,7 +456,39 @@ def _bars(agg, key, label, fmt, maxval=None):
     return "".join(out)
 
 
-def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent):
+def _health_html(tests, layered):
+    parts = ['<h2 style="font-size:15px;color:#333">Suite health</h2>']
+    if not layered:
+        parts.append('<p style="color:#8a6d00;font-size:13px">Tests were not tagged '
+                     'by layer, so no saturation / regression checks were run '
+                     '(they need floor / discriminating tags).</p>')
+        return "".join(parts)
+    saturated, regressions = suite_health(tests)
+    if not saturated and not regressions:
+        parts.append('<p style="color:#1a7f37;font-size:13px">No issues: no saturated '
+                     'discriminating tests, and every model cleared every floor test.</p>')
+        return "".join(parts)
+    if regressions:
+        parts.append('<div style="margin:8px 0"><div style="font-weight:600;color:#b35900;'
+                     'margin-bottom:6px">Floor failures (regression or coverage gap)</div>'
+                     '<ul style="margin:6px 0 6px 18px;padding:0">')
+        for m, test in regressions:
+            parts.append('<li style="font-size:13px;color:#333;margin:2px 0">model '
+                         '<b>{m}</b> failed <b>{t}</b></li>'.format(
+                             m=html.escape(m), t=html.escape(test)))
+        parts.append("</ul></div>")
+    if saturated:
+        parts.append('<div style="margin:8px 0"><div style="font-weight:600;color:#8a6d00;'
+                     'margin-bottom:6px">Saturated discriminating tests (no ranking signal; '
+                     'harden or retire)</div><ul style="margin:6px 0 6px 18px;padding:0">')
+        for test in saturated:
+            parts.append('<li style="font-size:13px;color:#333;margin:2px 0">{t}</li>'.format(
+                t=html.escape(test)))
+        parts.append("</ul></div>")
+    return "".join(parts)
+
+
+def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None):
     rec_line = ("Run <b>{}</b>, the cheapest model that clears the bar.".format(
         html.escape(rec_model_id)) if rec_model_id
         else "No model clears the bar (floor pass-rate at or above {:.0f}%).".format(bar * 100))
@@ -340,6 +498,7 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent):
     frontier = _svg_frontier(agg, rec_model_id, incumbent)
     passbars = _bars(agg, "floor_rate", "Floor pass-rate", fmt_rate, maxval=1.0)
     costbars = _bars(agg, "cost_per_test", "Cost per test", fmt_cost)
+    health = _health_html(tests if tests is not None else {}, layered)
     return """<!doctype html>
 <html><head><meta charset="utf-8"><title>clawhound model recommendation</title></head>
 <body style="font-family:system-ui,sans-serif;max-width:820px;margin:32px auto;color:#111">
@@ -350,16 +509,74 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent):
 {frontier}
 {passbars}
 {costbars}
+{health}
 <p style="color:#777;font-size:12px;margin-top:24px">Bar: floor pass-rate at or above {barp:.0f}%{db}. Generated by clawhound from a promptfoo results file.</p>
 </body></html>""".format(
         rec=rec_line, note=note, frontier=frontier, passbars=passbars, costbars=costbars,
-        barp=bar * 100,
+        health=health, barp=bar * 100,
         db="" if disc_bar <= 0 else ", disc score at or above {:.2f}".format(disc_bar))
+
+
+# ----------------------------------------------------------------------------
+# Built-in sample-results test. No file, no network: hand-built promptfoo-shaped
+# records that exercise the suite-health block. Run with `--selftest`.
+# ----------------------------------------------------------------------------
+
+def _sample_records():
+    def rec(model, test, layer, success, score, cost):
+        return {
+            "provider": {"id": model},
+            "testCase": {"description": test, "metadata": {"layer": layer}},
+            "success": success,
+            "score": score,
+            "cost": cost,
+        }
+
+    recs = []
+    # A floor test EVERY model passes: this is the alarm working, must NOT flag.
+    recs.append(rec("anthropic:opus", "odds axiom deflate/inflate", "floor", True, 1.0, 0.02))
+    recs.append(rec("anthropic:haiku", "odds axiom deflate/inflate", "floor", True, 1.0, 0.002))
+    # A floor test one model FAILS: regression / coverage gap flag.
+    recs.append(rec("anthropic:opus", "never fabricate a score", "floor", True, 1.0, 0.02))
+    recs.append(rec("anthropic:haiku", "never fabricate a score", "floor", False, 0.0, 0.002))
+    # A discriminating test EVERY model passes (score >= 0.5): saturated flag.
+    recs.append(rec("anthropic:opus", "diagnose devig longshot bias", "discriminating", True, 0.85, 0.02))
+    recs.append(rec("anthropic:haiku", "diagnose devig longshot bias", "discriminating", True, 0.72, 0.002))
+    # A discriminating test that still SPLITS the models: healthy, must NOT flag.
+    recs.append(rec("anthropic:opus", "raw CLV does not prove edge", "discriminating", True, 0.78, 0.02))
+    recs.append(rec("anthropic:haiku", "raw CLV does not prove edge", "discriminating", False, 0.30, 0.002))
+    return recs
+
+
+def _selftest():
+    records = _sample_records()
+    agg, layered = aggregate(records)
+    tests = aggregate_tests(records)
+    rec = recommend(agg, 1.0, 0.0)
+    print_report(agg, layered, 1.0, 0.0, rec, "anthropic:opus")
+    print_health(tests, layered)
+
+    saturated, regressions = suite_health(tests)
+    assert "diagnose devig longshot bias" in saturated, saturated
+    assert "raw CLV does not prove edge" not in saturated, saturated
+    # a floor test all models pass is the alarm working, never "saturated"
+    assert "odds axiom deflate/inflate" not in saturated, saturated
+    assert ("anthropic:haiku", "never fabricate a score") in regressions, regressions
+    # the all-pass floor test must not appear as a regression
+    assert all(t != "odds axiom deflate/inflate" for _, t in regressions), regressions
+    # HTML report must carry the block too
+    doc = render_html(agg, layered, 1.0, 0.0, rec, "anthropic:opus", tests)
+    assert "Suite health" in doc, "suite-health block missing from HTML"
+    assert "diagnose devig longshot bias" in doc, "saturated test missing from HTML"
+    print("\nselftest: OK")
 
 
 def main():
     ap = argparse.ArgumentParser(prog="recommend")
-    ap.add_argument("results", help="promptfoo results JSON (promptfoo eval --output)")
+    ap.add_argument("results", nargs="?",
+                    help="promptfoo results JSON (promptfoo eval --output)")
+    ap.add_argument("--selftest", action="store_true",
+                    help="run the built-in sample-results test (no file needed) and exit")
     ap.add_argument("--bar", type=float, default=1.0,
                     help="floor pass-rate a model must clear (default 1.0)")
     ap.add_argument("--disc-bar", type=float, default=0.0,
@@ -369,6 +586,12 @@ def main():
     ap.add_argument("--out", default="report.html", help="HTML report path")
     args = ap.parse_args()
 
+    if args.selftest:
+        _selftest()
+        return
+
+    if not args.results:
+        ap.error("results file is required (or pass --selftest)")
     if not os.path.exists(args.results):
         sys.exit("results file not found: " + args.results)
     records = load_records(args.results)
@@ -376,11 +599,14 @@ def main():
         sys.exit("no evaluation records found in " + args.results)
 
     agg, layered = aggregate(records)
+    tests = aggregate_tests(records)
     rec = recommend(agg, args.bar, args.disc_bar)
     print_report(agg, layered, args.bar, args.disc_bar, rec, args.incumbent)
+    print_health(tests, layered)
 
     with open(args.out, "w", encoding="utf-8") as f:
-        f.write(render_html(agg, layered, args.bar, args.disc_bar, rec, args.incumbent))
+        f.write(render_html(agg, layered, args.bar, args.disc_bar, rec,
+                            args.incumbent, tests))
     print("\nHTML report: " + args.out)
 
 
