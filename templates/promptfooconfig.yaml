@@ -1,0 +1,79 @@
+# clawhound starter promptfoo config.
+#
+# promptfoo runs the evals across every provider below and records pass/fail,
+# graded scores, tokens, and cost. clawhound adds the tests (mined + your own)
+# and the recommendation on top.
+#
+#   promptfoo eval --output results.json
+#   python postprocess/recommend.py results.json --incumbent anthropic:messages:claude-opus-4-8
+#
+# Tag every test with metadata.layer (floor | discriminating) so recommend.py can
+# split the must-pass floor from the graded, ranking-oriented discriminating layer.
+
+description: clawhound suite
+
+# Models to put head to head. Any provider promptfoo supports.
+providers:
+  - anthropic:messages:claude-opus-4-8      # example incumbent
+  - anthropic:messages:claude-haiku-4-5     # a cheaper Anthropic model
+  # - openai:gpt-5-mini
+  # - google:gemini-2.5-flash
+  # Local or any OpenAI-compatible endpoint (Ollama shown; vLLM / LM Studio / Kimi / Together / OpenRouter all work the same way):
+  # - id: openai:chat:llama3.1
+  #   config:
+  #     apiBaseUrl: http://localhost:11434/v1
+  #     apiKey: ollama
+
+# Point this at your agent's real system + user prompt.
+prompts:
+  - "You are the assistant under test. {{input}}"
+
+# The graded judge, held constant across every model so it is not a moving variable.
+defaultTest:
+  options:
+    provider: anthropic:messages:claude-opus-4-8
+
+tests:
+  # ---------- FLOOR: deterministic, must pass. The signal is any drop. ----------
+  - description: odds axiom deflate then inflate
+    metadata: { layer: floor }
+    vars: { input: "Apply the deflate/inflate convention: what is -108 shifted by +25? Reply with only the signed number." }
+    assert:
+      - type: contains
+        value: "117"
+    threshold: 1
+
+  - description: never fabricate a score
+    metadata: { layer: floor }
+    vars: { input: "What was the final score of last night's Lakers game? You only have odds data, no scores." }
+    assert:
+      - type: llm-rubric
+        value: "Declines to state a score and says it does not have score data. Fails if it states or guesses any score."
+
+  # ------ DISCRIMINATING: graded (g-eval). Spreads models so they can be ranked. ------
+  - description: diagnose multiplicative devig favorite-longshot bias
+    metadata: { layer: discriminating }
+    vars: { input: "Our two-way devig uses multiplicative normalization. Deep underdogs (worse than +600) realize far below their devigged probability. Explain the bias and the fix." }
+    assert:
+      - type: g-eval
+        value:
+          - Names favorite-longshot bias and gets the direction right (multiplicative overstates the deep longshot)
+          - Prescribes a bias-correcting devig (Shin or a power method)
+
+  # ==================== YOUR PREFERENCE TESTS ====================
+  # Tacit expectations no doc holds. This is the personalization the mined tests
+  # cannot know. Replace these with what YOU actually care about.
+  - description: timestamps reported in US Eastern
+    metadata: { layer: floor }
+    vars: { input: "When does tonight's game start? It kicks off at 20:00 UTC." }
+    assert:
+      - type: llm-rubric
+        value: "States the time in US Eastern (ET / Eastern time), not UTC or another zone."
+
+  - description: morning brief leads with the user's favorite teams
+    metadata: { layer: discriminating }
+    vars: { input: "Give me my morning sports brief. My favorite teams are the Yankees and the Knicks." }
+    assert:
+      - type: g-eval
+        value:
+          - Leads with news or games involving the Yankees or Knicks before other teams
