@@ -13,10 +13,18 @@ proposal.
 
 ## Phase 0. Scope
 
-List the repos and systems in play. For each, ask: does the model's behavior here
-have REAL stakes (revenue, customers, correctness, compliance, cost)? Drop the
-no-stakes toys (a weekend side project where a wrong answer costs nothing) unless
-its behavior genuinely matters to the owner. This sizes the engagement honestly.
+SURVEY the whole project tree first, do not just take the human's named list. Walk
+the tree for every sub-repo / service / major code area (nested `.git` dirs,
+`package.json` / `pyproject`, service folders, per-area docs and style guides) and
+note each one's rough size. Humans set projects up imperfectly and stop seeing the
+gaps, so surface the surfaces they may have forgotten rather than inheriting their
+blind spot. The suite-generation skill runs the same survey and must end with a
+coverage map, so no surveyed surface silently ends up with zero tests.
+
+Then, for each surface in play, ask: does the model's behavior here have REAL stakes
+(revenue, customers, correctness, compliance, cost)? Drop the no-stakes toys (a
+weekend side project where a wrong answer costs nothing) unless its behavior
+genuinely matters to the owner. This sizes the engagement honestly.
 
 ## Phase 1. Surface
 

@@ -40,6 +40,14 @@ root) so every service is represented and gets its own routing verdict. A
 single-repo project can instead categorize by topic. Either way, no test ships
 without both a layer and a category.
 
+Survey before you mine, and map coverage after. Enumerate every sub-repo / service
+/ major code area (nested `.git` dirs, `package.json` / `pyproject`, service folders,
+per-area docs) with a rough size BEFORE writing tests, rather than trusting the root
+doc or the human's named list, since a forgotten-but-live service is exactly the one
+that ends up untested. Then close every generation with a coverage map (each surveyed
+surface -> case count, or UNCOVERED with a reason); a large code area at zero cases is
+reported loudly for the human to accept or reject, never dropped in silence.
+
 ## Rule to assertion
 
 | The expectation | promptfoo assertion |

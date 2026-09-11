@@ -20,6 +20,39 @@ a `tests` list. Tag EVERY test with BOTH:
 So a test's metadata reads for example `{ layer: floor, category: odds-math }`.
 Start from `templates/promptfooconfig.yaml`.
 
+## Step 0: SURVEY the whole tree first (mandatory, before any mining)
+
+Before you read a single rule, SURVEY the entire project tree and write down every
+surface that could carry model behavior. Mining a suite without this step is how a
+whole service ends up with zero tests and nobody notices.
+
+Enumerate every sub-repo, service, and major top-level code area:
+- Look for nested `.git` directories (each is its own deployable repo), `package.json`
+  / `pyproject.toml` / `requirements.txt` (each marks a service root), service folders,
+  and per-area docs and style guides (`README`, `CLAUDE.md`, `AGENTS.md`, `docs/`,
+  `STYLE_GUIDE.md`).
+- For each surface, record a ROUGH SIZE (a code-file count is enough) and WHICH DOCS
+  it has. Size tells you how much coverage a surface deserves; a 400-file frontend and
+  a 9-file microservice are not the same claim on the suite.
+
+Do NOT rely only on the root `CLAUDE.md`, a root doc, or the human's named list of
+things to test. Humans set projects up imperfectly and then stop seeing the gaps: a
+service gets cloned in, works, and drops out of the mental model. The miner's job is
+to surface the surfaces the human may have forgotten, not to inherit their blind spot.
+If the root doc names four services and the tree has five, the fifth is exactly the one
+that needs surfacing.
+
+Cross-reference BOTH ways. The root architecture overview (for example a "Project
+Overview" in the root `CLAUDE.md`) is a DECLARED list of surfaces, so seed the coverage
+checklist from it as well as from the tree walk. A service the docs explicitly declare
+that comes back with zero tests is the loudest gap of all: the map was handed to you and
+you tested one corner of it.
+
+Emit the survey (surface -> size -> docs found) as the first thing in your report, and
+treat it as the checklist every later step is measured against.
+
+
+
 ### Category = service, in a multi-repo project
 
 For a MULTI-REPO project, each sub-repo or service is its own category. On EV
@@ -132,3 +165,17 @@ fresh generation.
 Write `promptfooconfig.yaml` into the client's private suites location (one folder
 per project). Report a summary: case count split by layer and by assertion type,
 the categories covered, and which sources each case came from.
+
+### End EVERY generation with a COVERAGE MAP (mandatory)
+
+Close the report by mapping the Step 0 survey against what you actually generated.
+List EVERY surveyed surface with one of two outcomes:
+- `<surface> -> N cases` (floor / discriminating split), or
+- `<surface> -> UNCOVERED (reason)`.
+
+Never present a suite that silently ignores a surface. A large code area with zero
+cases must be reported LOUDLY, called out as a coverage gap, so the human can accept
+it ("that service has no live AI behavior") or reject it ("mine it too") on purpose.
+Silence is not acceptance. This holds in augment mode as well: map the surfaces the
+existing suite already covers against the ones your additions cover, and flag any
+surveyed surface still at zero.
