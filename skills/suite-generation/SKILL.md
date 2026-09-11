@@ -150,6 +150,38 @@ the matrix rank models; a suite of only floor cases saturates and ranks nothing.
   could contain, use an `llm-rubric` that judges what the answer DOES, not which
   strings it happens to mention.
 
+## No naked-recall tests (mine the fact, do not test recall of it)
+
+**A mined fact must never become a naked recall test.** If the correct answer is a
+private fact not derivable from the prompt (a hex code, a route path, an internal
+name, a config value, a vendor name), a context-free model cannot know it, and the
+test measures nothing except whether the model happened to memorize your repo. That
+is an invalid test: a strong model and a weak model both "fail" it for the same
+reason (neither was told the fact), so it ranks nothing and gates nothing.
+
+Turn every such fact into one of two valid shapes:
+
+- **Context-provided (apply the rule).** Put the convention in the prompt or a
+  system block exactly as the model has it in production (its system prompt, or a
+  retrieved context snippet), then test whether the model correctly APPLIES or obeys
+  it. This mirrors deployment, where the model is handed the rule and must act on it
+  (write the call to the right base path, use the header, obey the brand token).
+- **Behavioral (handle the situation).** Give the model a scenario, an API error, a
+  null, an empty response, a task, and grade how it HANDLES it. This needs no private
+  recall at all.
+
+Litmus test for every test you write: "could the model answer this from the prompt
+alone, or is it being asked to have memorized our repo?" If the latter, rebuild it
+into one of the two shapes above.
+
+Copy `blackwire` as the model to follow: it GIVES the axiom or rule in the prompt
+(the deflate / inflate odds convention, the draw-is-a-push settlement rule, the
+raw-feed vs graded fee split) and then tests whether the model APPLIES it, rather
+than asking the model to recall a value it was never given. A test that reads "what
+is the hex value of our accent color?" or "what is our API base path?" with the
+answer nowhere in the prompt is broken; rebuild it so the prompt supplies the token
+or path and the test checks that the model uses it correctly.
+
 ## Cautions (state these to the human, do not skip them)
 
 - **Circularity.** You are drafting tests from what the repo already "knows," so a

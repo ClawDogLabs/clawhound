@@ -91,6 +91,33 @@ that ends up untested. Then close every generation with a coverage map (each sur
 surface -> case count, or UNCOVERED with a reason); a large code area at zero cases is
 reported loudly for the human to accept or reject, never dropped in silence.
 
+## No naked-recall tests (mine the fact, do not test recall of it)
+
+A mined fact must never become a naked recall test. If the correct answer is a
+private fact not derivable from the prompt (a hex code, a route path, an internal
+name, a config value, a vendor name), a context-free model cannot know it, and the
+test measures nothing except whether the model happened to memorize the repo. It is
+an invalid test: a strong model and a weak model both "fail" it for the same reason
+(neither was told the fact), so it ranks and gates nothing.
+
+Turn every such fact into one of two valid shapes:
+
+- **Context-provided (apply the rule).** Put the convention in the prompt or a system
+  block exactly as the model has it in production (its system prompt, or a retrieved
+  context snippet), then test whether the model correctly APPLIES or obeys it. This
+  mirrors deployment: the model is handed the rule and must act on it (write the call
+  to the right base path, use the auth header, obey the brand token).
+- **Behavioral (handle the situation).** Give the model a scenario, an API error, a
+  null, an empty response, a task, and grade how it HANDLES it. This needs no private
+  recall at all.
+
+Litmus for every test: "could the model answer this from the prompt alone, or is it
+being asked to have memorized our repo?" If the latter, rebuild it into one of the
+two shapes above. Copy `blackwire` as the model to follow: it GIVES the axiom in the
+prompt (the deflate / inflate odds convention, the draw-is-a-push rule, the fee-context
+split) and tests whether the model APPLIES it, rather than asking it to recall a value
+it was never given.
+
 ## Rule to assertion
 
 | The expectation | promptfoo assertion |
