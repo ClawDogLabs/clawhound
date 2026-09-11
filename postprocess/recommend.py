@@ -275,12 +275,17 @@ def aggregate_tests(records):
             "layer": layer,
             "n_models": 0,
             "n_passed": 0,
-            "failed_models": [],
+            # Repeated runs (promptfoo --repeat) carry the same (model, test)
+            # many times. Count runs and fails PER MODEL so the health view can
+            # say "fails 5/5" once instead of printing one line per repeat.
+            "runs_by_model": {},
+            "fails_by_model": {},
         })
         if t["layer"] is None and layer is not None:
             t["layer"] = layer
         t["n_models"] += 1
         model = rec_model(r)
+        t["runs_by_model"][model] = t["runs_by_model"].get(model, 0) + 1
         score = r.get("score")
         if layer == "discriminating":
             passed = isinstance(score, (int, float)) and float(score) >= 0.5
@@ -290,7 +295,7 @@ def aggregate_tests(records):
         if passed:
             t["n_passed"] += 1
         else:
-            t["failed_models"].append(model)
+            t["fails_by_model"][model] = t["fails_by_model"].get(model, 0) + 1
     return tests
 
 
@@ -299,8 +304,10 @@ def suite_health(tests):
 
     saturated   list of discriminating test keys that EVERY model passed. These
                 no longer rank anything, so they should be hardened or retired.
-    regressions list of (model, test key) where a FLOOR test failed for a model.
-                A floor test all models pass is NOT a problem (that is the alarm
+    regressions list of (model, test key, fails, runs) where a FLOOR test failed
+                for a model. DEDUPED across repeats: one tuple per (model, test)
+                with the fail count and total run count, never one per repeat. A
+                floor test all models pass is NOT a problem (that is the alarm
                 working), so floor tests are never flagged for saturation.
     """
     saturated = []
@@ -311,8 +318,9 @@ def suite_health(tests):
             if t["n_models"] > 0 and t["n_passed"] == t["n_models"]:
                 saturated.append(key)
         elif layer == "floor":
-            for m in t["failed_models"]:
-                regressions.append((m, key))
+            for m, fails in t["fails_by_model"].items():
+                runs = t["runs_by_model"].get(m, fails)
+                regressions.append((m, key, fails, runs))
     saturated.sort()
     regressions.sort()
     return saturated, regressions
@@ -406,6 +414,150 @@ def route_by_category(cat_aggs, bar, disc_bar, optimize="cost"):
 
 
 # ----------------------------------------------------------------------------
+# Category labels (optional sidecar) + owner-summary derivation
+# ----------------------------------------------------------------------------
+
+def load_category_labels(results_path):
+    """Read an OPTIONAL <results-dir>/categories.yaml sidecar (same schema the
+    digest uses: categories: {name: {label, graded_on}}).
+
+    Returns {category-name: label}. Absent file, no PyYAML, unreadable file, or
+    malformed content yields {} (never raises), so a missing sidecar just means
+    the report falls back to the bare category name. This ties the report to the
+    digest's categories without making PyYAML a hard dependency.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(results_path)),
+                        "categories.yaml")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        import yaml
+    except ImportError:
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        return {}
+    cats = (d or {}).get("categories") if isinstance(d, dict) else None
+    if not isinstance(cats, dict):
+        return {}
+    out = {}
+    for name, entry in cats.items():
+        if isinstance(entry, dict) and entry.get("label"):
+            out[str(name).lower()] = str(entry["label"])
+    return out
+
+
+def category_label(cat, labels):
+    """The human label for a category, falling back to the bare name."""
+    return (labels or {}).get(cat, cat)
+
+
+def strongest_model(agg):
+    """The model CLOSEST to clearing when none does: highest floor pass-rate,
+    tie-broken by higher discriminating score, then any model. Returns None for
+    an empty aggregate."""
+    best = None
+    for m, s in agg.items():
+        fr = s.get("floor_rate")
+        fr = -1.0 if fr is None else fr
+        dsc = s.get("disc")
+        dsc = -1.0 if dsc is None else dsc
+        key = (fr, dsc, m)
+        if best is None or key > best[0]:
+            best = (key, m)
+    return best[1] if best else None
+
+
+def category_route_info(cat, agg, bar, disc_bar, optimize):
+    """Everything the owner line for one category needs.
+
+    Returns dict: model (recommended, or None), n_clearers, strongest (closest
+    model when none clears), reason (plain sentence fragment), cpt, lat_s.
+    Reasons, none hardcoding a model name:
+      "the only model that clears the bar"        exactly one model clears
+      "fastest that clears the bar" / "cheapest that clears the bar"
+                                                  more than one clears
+      "no model clears the bar yet, <strongest> is closest, review the checks"
+                                                  nothing clears
+    """
+    def clears(s):
+        if s["floor_rate"] is None or s["floor_rate"] < bar:
+            return False
+        if disc_bar > 0 and (s["disc"] is None or s["disc"] < disc_bar):
+            return False
+        return True
+
+    clearers = [m for m, s in agg.items() if clears(s)]
+    model = recommend(agg, bar, disc_bar, optimize)
+    cpt = agg[model]["cost_per_test"] if (model and model in agg) else None
+    lat_s = agg[model]["latency_s"] if (model and model in agg) else None
+    if model is None:
+        strong = strongest_model(agg)
+        reason = ("no model clears the bar yet, " + str(strong)
+                  + " is closest, review the checks")
+        return {"model": None, "n_clearers": 0, "strongest": strong,
+                "reason": reason, "cpt": None, "lat_s": None}
+    if len(clearers) == 1:
+        reason = "the only model that clears the bar"
+    else:
+        reason = ("fastest that clears the bar" if optimize == "latency"
+                  else "cheapest that clears the bar")
+    return {"model": model, "n_clearers": len(clearers), "strongest": model,
+            "reason": reason, "cpt": cpt, "lat_s": lat_s}
+
+
+def owner_routing(cat_aggs, bar, disc_bar, optimize="cost"):
+    """category -> category_route_info, for every category, sorted-friendly."""
+    return {cat: category_route_info(cat, agg, bar, disc_bar, optimize)
+            for cat, agg in cat_aggs.items()}
+
+
+def everyday_pick(owner_route, optimize, agg):
+    """The model recommended for the MOST categories (the 'everyday' pick).
+
+    Ties are broken by the overall optimize metric (the cheaper / faster model
+    overall wins the 'everyday' label). Returns the model id, or None when no
+    category routes to any model.
+    """
+    counts = {}
+    for info in owner_route.values():
+        m = info["model"]
+        if m is not None:
+            counts[m] = counts.get(m, 0) + 1
+    if not counts:
+        return None
+    field = _metric_field(optimize)
+
+    def tiebreak(m):
+        v = agg.get(m, {}).get(field)
+        return (v is None, v if v is not None else 0.0)
+
+    best = max(counts, key=lambda m: (counts[m], -tiebreak(m)[0],
+                                      -(tiebreak(m)[1])))
+    return best
+
+
+def category_floor_failures(records):
+    """{category: [(model, test, fails, runs), ...]} DEDUPED per (model, test).
+
+    Groups records by category, then reuses aggregate_tests + suite_health on
+    each group, so a floor test that fails on every one of K repeats appears once
+    as (model, test, K, K), never K times.
+    """
+    groups = {}
+    for r in records:
+        c = rec_category(r) or "uncategorized"
+        groups.setdefault(c, []).append(r)
+    out = {}
+    for c, recs in groups.items():
+        _saturated, regressions = suite_health(aggregate_tests(recs))
+        out[c] = regressions
+    return out
+
+
+# ----------------------------------------------------------------------------
 # Text report
 # ----------------------------------------------------------------------------
 
@@ -494,9 +646,9 @@ def print_health(tests, layered):
         print("No issues: no saturated discriminating tests, and every model "
               "cleared every floor test.")
         return
-    for m, test in regressions:
-        print('FLOOR FAIL: model {} failed "{}": regression or coverage gap.'
-              .format(m, test))
+    for m, test, fails, runs in regressions:
+        print('FLOOR FAIL: model {} fails "{}" ({}/{} runs): regression or '
+              'coverage gap.'.format(m, test, fails, runs))
     for test in saturated:
         print('SATURATED: discriminating test "{}" - all models passed, so it '
               'gives no ranking signal. Harden or retire it.'.format(test))
@@ -544,27 +696,48 @@ def print_routing(cat_aggs, categorized, bar, disc_bar, optimize="cost"):
 # HTML report with inline SVG frontier (no external libraries)
 # ----------------------------------------------------------------------------
 
+def _frontier_ylo(agg):
+    """Lower bound (in percent) for the zoomed floor-pass-rate axis.
+
+    min(80, floor(lowest model pass-rate in percent)). So a suite whose worst
+    model sits at 94% gets an 80-to-100 axis (dots spread out instead of
+    crushing against the top), while a genuinely weak 71% gets a 71-to-100 axis.
+    The bound NEVER starts above 80, so a strong suite always keeps 20 points of
+    visible headroom. Returns 0 only in the degenerate all-unknown case.
+    """
+    rates = [s["floor_rate"] for s in agg.values() if s.get("floor_rate") is not None]
+    if not rates:
+        return 0
+    import math
+    return min(80, int(math.floor(min(rates) * 100)))
+
+
 def _svg_frontier(agg, rec_model_id, incumbent, optimize="cost"):
     latency = (optimize == "latency")
     field = "latency_s" if latency else "cost_per_test"
     axis_word = "median latency" if latency else "cost"
-    pts = [(m, s) for m, s in agg.items() if s.get(field) is not None]
-    W, H = 720, 420
-    ml, mr, mt, mb = 70, 30, 30, 60
+    pts = [(m, s) for m, s in agg.items()
+           if s.get(field) is not None and s.get("floor_rate") is not None]
+    W, H = 760, 380
+    ml, mr, mt, mb = 62, 210, 24, 56
     pw, ph = W - ml - mr, H - mt - mb
     if not pts:
         return ('<svg width="{w}" height="80"><text x="10" y="45" '
                 'font-family="system-ui" font-size="14">No models reported a {a}; '
                 'nothing to plot on the {a} axis.</text></svg>').format(w=W, a=axis_word)
-    max_cost = max(s[field] for _, s in pts) or 1e-9
-    max_cost *= 1.15
+    max_x = max(s[field] for _, s in pts) or 1e-9
+    max_x *= 1.15
+    ylo = _frontier_ylo(agg)          # percent
+    ylo_f = ylo / 100.0               # fraction
+    span = (1.0 - ylo_f) or 1e-9
 
     def px(c):
-        return ml + (c / max_cost) * pw
+        return ml + (c / max_x) * pw
 
     def py(rate):
-        r = 0.0 if rate is None else rate
-        return mt + (1 - r) * ph
+        r = ylo_f if rate is None else rate
+        r = max(ylo_f, min(1.0, r))
+        return mt + (1 - (r - ylo_f) / span) * ph
 
     parts = ['<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" '
              'font-family="system-ui, sans-serif">'.format(w=W, h=H)]
@@ -574,191 +747,352 @@ def _svg_frontier(agg, rec_model_id, incumbent, optimize="cost"):
         x=ml, t=mt, b=mt + ph))
     parts.append('<line x1="{x}" y1="{b}" x2="{r}" y2="{b}" stroke="#888"/>'.format(
         x=ml, b=mt + ph, r=ml + pw))
-    # y grid + labels (pass-rate 0..100)
+    # y grid + labels (zoomed pass-rate ylo..100)
     for i in range(0, 5):
-        r = i / 4.0
-        y = py(r)
-        parts.append('<line x1="{x}" y1="{y}" x2="{r}" y2="{y}" stroke="#eee"/>'.format(
+        pct = ylo + (100 - ylo) * i / 4.0
+        y = py(pct / 100.0)
+        parts.append('<line x1="{x}" y1="{y}" x2="{r}" y2="{y}" stroke="#eef0f4"/>'.format(
             x=ml, y=y, r=ml + pw))
-        parts.append('<text x="{x}" y="{y}" font-size="11" fill="#555" '
-                     'text-anchor="end">{v:.0f}%</text>'.format(x=ml - 8, y=y + 4, v=r * 100))
+        parts.append('<text x="{x}" y="{y}" font-size="11" fill="#667" '
+                     'text-anchor="end">{v:.0f}%</text>'.format(x=ml - 8, y=y + 4, v=pct))
     # x labels (active metric: cost per test, or median latency in seconds)
     for i in range(0, 5):
-        c = max_cost * i / 4.0
+        c = max_x * i / 4.0
         x = px(c)
         lbl = "{v:.3f}s".format(v=c) if latency else "${v:.4f}".format(v=c)
-        parts.append('<text x="{x}" y="{y}" font-size="11" fill="#555" '
+        parts.append('<text x="{x}" y="{y}" font-size="11" fill="#667" '
                      'text-anchor="middle">{l}</text>'.format(x=x, y=mt + ph + 18, l=lbl))
-    axis_title = ("median latency per test (seconds)" if latency
-                  else "cost per test (USD)")
+    axis_title = ("median latency per test (seconds), lower is better" if latency
+                  else "cost per test (USD), lower is better")
     parts.append('<text x="{x}" y="{y}" font-size="12" fill="#333" '
                  'text-anchor="middle">{t}</text>'.format(
-                     x=ml + pw / 2, y=H - 12, t=axis_title))
-    parts.append('<text transform="translate(16,{y}) rotate(-90)" font-size="12" '
+                     x=ml + pw / 2, y=H - 10, t=html.escape(axis_title)))
+    parts.append('<text transform="translate(15,{y}) rotate(-90)" font-size="12" '
                  'fill="#333" text-anchor="middle">floor pass-rate</text>'.format(
                      y=mt + ph / 2))
-    # dots
+    # dots only (no inline labels -> a compact legend carries the names, so
+    # nearby dots never collide). Recommended ringed, incumbent in purple.
     for m, s in pts:
         x, y = px(s[field]), py(s["floor_rate"])
         recommended = (m == rec_model_id)
         is_inc = (incumbent and m == incumbent)
         color = "#1a7f37" if recommended else ("#8250df" if is_inc else "#0969da")
-        parts.append('<circle cx="{x}" cy="{y}" r="6" fill="{c}" '
-                     'stroke="#fff" stroke-width="1.5"/>'.format(x=x, y=y, c=color))
         if recommended:
             parts.append('<circle cx="{x}" cy="{y}" r="11" fill="none" '
                          'stroke="#1a7f37" stroke-width="2"/>'.format(x=x, y=y))
-        label = html.escape(m)
-        parts.append('<text x="{x}" y="{y}" font-size="11" fill="#222" '
-                     'text-anchor="middle">{l}</text>'.format(x=x, y=y - 14, l=label))
-    # legend
-    lg = mt + 6
-    parts.append('<circle cx="{x}" cy="{y}" r="5" fill="#1a7f37"/>'
-                 '<text x="{tx}" y="{ty}" font-size="11" fill="#333">recommended</text>'.format(
-                     x=ml + pw - 150, y=lg, tx=ml + pw - 140, ty=lg + 4))
-    if incumbent:
-        parts.append('<circle cx="{x}" cy="{y}" r="5" fill="#8250df"/>'
-                     '<text x="{tx}" y="{ty}" font-size="11" fill="#333">you are here</text>'.format(
-                         x=ml + pw - 150, y=lg + 18, tx=ml + pw - 140, ty=lg + 22))
+        parts.append('<circle cx="{x}" cy="{y}" r="6" fill="{c}" '
+                     'stroke="#fff" stroke-width="1.5"/>'.format(x=x, y=y, c=color))
+    # compact legend: colored dot + full model id + its metric and pass-rate.
+    # Vertical list in the right margin, so labels stack and never overlap.
+    lx = ml + pw + 22
+    ly = mt + 10
+    legend_rows = sorted(pts, key=optimize_sort_key(optimize))
+    for m, s in legend_rows:
+        recommended = (m == rec_model_id)
+        is_inc = (incumbent and m == incumbent)
+        color = "#1a7f37" if recommended else ("#8250df" if is_inc else "#0969da")
+        metric_txt = (fmt_latency(s["latency_s"]) if latency
+                      else fmt_cost(s["cost_per_test"]))
+        tag = " *rec" if recommended else (" *here" if is_inc else "")
+        parts.append('<circle cx="{x}" cy="{y}" r="5" fill="{c}"/>'.format(
+            x=lx, y=ly, c=color))
+        parts.append('<text x="{tx}" y="{ty}" font-size="11" fill="#222">{l}</text>'.format(
+            tx=lx + 11, ty=ly + 4, l=html.escape(m + tag)))
+        parts.append('<text x="{tx}" y="{ty}" font-size="10" fill="#889">{l}</text>'.format(
+            tx=lx + 11, ty=ly + 17,
+            l=html.escape(fmt_rate(s["floor_rate"]) + " floor, " + metric_txt)))
+        ly += 40
+    # legend key for the markers
+    parts.append('<text x="{tx}" y="{ty}" font-size="10" fill="#99a">'
+                 '*rec = recommended{inc}</text>'.format(
+                     tx=lx, ty=ly + 4,
+                     inc=", *here = you are here" if incumbent else ""))
     parts.append("</svg>")
     return "".join(parts)
 
 
-def _bars(agg, key, label, fmt, maxval=None):
-    rows = list(agg.items())
-    if maxval is None:
-        vals = [s[key] for _, s in rows if s[key] is not None]
-        maxval = max(vals) if vals else 1.0
-    maxval = maxval or 1.0
-    out = ['<div style="margin:8px 0"><div style="font-weight:600;margin-bottom:6px">'
-           + html.escape(label) + "</div>"]
+_REPORT_CSS = """
+* { box-sizing: border-box; }
+body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: #1a1f2b; background: #f7f8fa; margin: 0; padding: 2rem 1rem; line-height: 1.5; }
+.wrap { max-width: 920px; margin: 0 auto; }
+h1 { font-size: 1.5rem; margin: 0 0 .5rem; }
+h2 { font-size: 1.05rem; margin: 1.8rem 0 .6rem; color: #2a3140; }
+.owner { background: #fff; border: 1px solid #d7dce4; border-radius: 10px;
+  padding: 1rem 1.15rem; margin: 0 0 1rem; }
+.owner .headline { font-size: 1.05rem; color: #1a1f2b; margin: 0 0 .7rem; }
+.owner .headline b { color: #0f5a2a; }
+.owner ul { margin: .3rem 0 0; padding: 0; list-style: none; }
+.owner li { font-size: .95rem; color: #333; padding: .28rem 0;
+  border-top: 1px solid #eef0f4; }
+.owner li:first-child { border-top: none; }
+.owner li .cat { font-weight: 600; }
+.owner li .mdl { color: #0f5a2a; font-weight: 600; }
+.owner li .why { color: #778; font-size: .86rem; }
+.owner li.none .mdl { color: #b35900; }
+.note { color: #8a6d00; font-size: .86rem; margin: .4rem 0; }
+.chart { background: #fff; border: 1px solid #d7dce4; border-radius: 10px;
+  padding: .6rem; overflow-x: auto; }
+.chart svg { display: block; max-width: 100%; height: auto; }
+table.models { border-collapse: collapse; font-size: .86rem; width: 100%; margin: .2rem 0; }
+table.models th { text-align: right; padding: .3rem .6rem; border-bottom: 1px solid #dde2ea;
+  color: #667; font-weight: 600; white-space: nowrap; }
+table.models th.l, table.models td.l { text-align: left; }
+table.models td { text-align: right; padding: .3rem .6rem; border-bottom: 1px solid #f0f2f6;
+  white-space: nowrap; }
+table.models tr.win td { background: #f0faf3; }
+table.models td .win-tag { color: #1a7f37; font-weight: 700; font-size: .78rem; }
+table.models td .here-tag { color: #8250df; font-weight: 700; font-size: .78rem; }
+details.cat { border: 1px solid #d7dce4; border-radius: 8px; background: #fff;
+  margin-bottom: .7rem; overflow: hidden; }
+details.cat > summary { font-size: 1rem; padding: .7rem .9rem; cursor: pointer;
+  background: #fbfcfe; list-style: none; }
+details.cat > summary::-webkit-details-marker { display: none; }
+details.cat > summary::before { content: "\\25B8"; color: #99a; margin-right: .5rem; }
+details.cat[open] > summary::before { content: "\\25BE"; }
+details.cat > summary .cat { font-weight: 600; }
+details.cat > summary .arrow { color: #889; }
+details.cat > summary .mdl { color: #0f5a2a; font-weight: 600; }
+details.cat > summary .why { color: #778; font-size: .82rem; margin-left: .3rem; }
+details.cat[data-none="1"] > summary .mdl { color: #b35900; }
+.cat-body { padding: .3rem .9rem .9rem; }
+.fail-head { font-weight: 600; color: #b35900; font-size: .84rem; margin: .8rem 0 .3rem; }
+ul.fails { margin: .2rem 0 .2rem 1.1rem; padding: 0; }
+ul.fails li { font-size: .86rem; color: #333; margin: .18rem 0; }
+ul.fails li b { color: #1a1f2b; }
+.clean { color: #1a7f37; font-size: .86rem; margin: .5rem 0 .2rem; }
+ul.sat { margin: .2rem 0 .2rem 1.1rem; padding: 0; }
+ul.sat li { font-size: .86rem; color: #333; margin: .18rem 0; }
+.foot { color: #889; font-size: .8rem; margin-top: 1.8rem; }
+.controls { position: fixed; top: 12px; right: 14px; z-index: 20; display: flex; gap: 6px; }
+.controls button { font: inherit; font-size: .78rem; padding: .35rem .7rem; cursor: pointer;
+  border: 1px solid #cdd3dd; background: #fff; border-radius: 6px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+.controls button:hover { background: #eef1f6; }
+"""
+
+
+def _model_table(agg, winner, incumbent):
+    """Compact per-model table: floor pass-rate, discriminating score, latency,
+    cost, with the winner (recommended for this scope) and incumbent marked."""
+    esc = html.escape
+    rows = sorted(agg.items(), key=lambda kv: (kv[1]["floor_rate"] is None,
+                                               -(kv[1]["floor_rate"] or 0)))
+    out = ['<table class="models"><thead><tr>'
+           '<th class="l">model</th><th>floor</th><th>disc</th>'
+           '<th>latency</th><th>cost/test</th><th class="l"></th>'
+           '</tr></thead><tbody>']
     for m, s in rows:
-        v = s[key]
-        w = 0 if v is None else max(2, (v / maxval) * 320)
-        txt = "n/a" if v is None else fmt(v)
+        is_win = (m == winner)
+        is_here = (incumbent and m == incumbent)
+        tag = ('<span class="win-tag">run this</span>' if is_win
+               else ('<span class="here-tag">you are here</span>' if is_here else ""))
         out.append(
-            '<div style="display:flex;align-items:center;gap:8px;margin:3px 0">'
-            '<div style="width:200px;font-size:12px;color:#333;overflow:hidden;'
-            'text-overflow:ellipsis;white-space:nowrap">{m}</div>'
-            '<div style="height:14px;width:{w:.0f}px;background:#0969da;border-radius:3px"></div>'
-            '<div style="font-size:12px;color:#555">{t}</div></div>'.format(
-                m=html.escape(m), w=w, t=html.escape(txt)))
-    out.append("</div>")
+            '<tr class="{cls}"><td class="l">{m}</td><td>{fr}</td><td>{d}</td>'
+            '<td>{lat}</td><td>{c}</td><td class="l">{tag}</td></tr>'.format(
+                cls="win" if is_win else "",
+                m=esc(m), fr=esc(fmt_rate(s["floor_rate"])),
+                d=esc(fmt_score(s["disc"])), lat=esc(fmt_latency(s["latency_s"])),
+                c=esc(fmt_cost(s["cost_per_test"])), tag=tag))
+    out.append("</tbody></table>")
     return "".join(out)
 
 
-def _health_html(tests, layered):
-    parts = ['<h2 style="font-size:15px;color:#333">Suite health</h2>']
-    if not layered:
-        parts.append('<p style="color:#8a6d00;font-size:13px">Tests were not tagged '
-                     'by layer, so no saturation / regression checks were run '
-                     '(they need floor / discriminating tags).</p>')
-        return "".join(parts)
-    saturated, regressions = suite_health(tests)
-    if not saturated and not regressions:
-        parts.append('<p style="color:#1a7f37;font-size:13px">No issues: no saturated '
-                     'discriminating tests, and every model cleared every floor test.</p>')
-        return "".join(parts)
-    if regressions:
-        parts.append('<div style="margin:8px 0"><div style="font-weight:600;color:#b35900;'
-                     'margin-bottom:6px">Floor failures (regression or coverage gap)</div>'
-                     '<ul style="margin:6px 0 6px 18px;padding:0">')
-        for m, test in regressions:
-            parts.append('<li style="font-size:13px;color:#333;margin:2px 0">model '
-                         '<b>{m}</b> failed <b>{t}</b></li>'.format(
-                             m=html.escape(m), t=html.escape(test)))
-        parts.append("</ul></div>")
-    if saturated:
-        parts.append('<div style="margin:8px 0"><div style="font-weight:600;color:#8a6d00;'
-                     'margin-bottom:6px">Saturated discriminating tests (no ranking signal; '
-                     'harden or retire)</div><ul style="margin:6px 0 6px 18px;padding:0">')
-        for test in saturated:
-            parts.append('<li style="font-size:13px;color:#333;margin:2px 0">{t}</li>'.format(
-                t=html.escape(test)))
-        parts.append("</ul></div>")
+def _owner_summary_html(owner_route, everyday, labels, bar, disc_bar, optimize):
+    """Always-visible, plain-language routing summary an owner can read.
+
+    Headline: the everyday pick (recommended for the most categories) and the
+    exceptions (categories that route elsewhere or that nothing clears). No model
+    name is hardcoded, so it reads naturally with any provider field.
+    """
+    esc = html.escape
+
+    def lbl(c):
+        return category_label(c, labels)
+
+    parts = ['<div class="owner">']
+    if everyday is None:
+        parts.append('<p class="headline">No model clears the bar on any category '
+                     'yet. Review the checks in each section below.</p>')
+    else:
+        everyday_cats = sorted(lbl(c) for c, i in owner_route.items()
+                               if i["model"] == everyday)
+        other = {}
+        none_cats = []
+        for c, i in owner_route.items():
+            if i["model"] is None:
+                none_cats.append(lbl(c))
+            elif i["model"] != everyday:
+                other.setdefault(i["model"], []).append(lbl(c))
+        head = ('Run <b>{e}</b> for everyday work: {cats}.').format(
+            e=esc(everyday), cats=esc(", ".join(everyday_cats)))
+        sentences = [head]
+        for m in sorted(other):
+            sentences.append('Reach for <b>{m}</b> on {cats}.'.format(
+                m=esc(m), cats=esc(", ".join(sorted(other[m])))))
+        if none_cats:
+            sentences.append('No model clears the bar yet on {cats}; '
+                             'review the checks.'.format(
+                                 cats=esc(", ".join(sorted(none_cats)))))
+        if not other and not none_cats:
+            sentences.append('It clears the bar on every categorized service.')
+        parts.append('<p class="headline">' + " ".join(sentences) + "</p>")
+
+    parts.append("<ul>")
+    for c in sorted(owner_route):
+        i = owner_route[c]
+        if i["model"] is None:
+            parts.append(
+                '<li class="none"><span class="cat">{cat}</span> '
+                '<span class="arrow">-></span> <span class="mdl">no model clears '
+                'it yet</span> <span class="why">({why})</span></li>'.format(
+                    cat=esc(lbl(c)), why=esc(i["reason"])))
+        else:
+            parts.append(
+                '<li><span class="cat">{cat}</span> <span class="arrow">-></span> '
+                'run <span class="mdl">{m}</span> '
+                '<span class="why">({why})</span></li>'.format(
+                    cat=esc(lbl(c)), m=esc(i["model"]), why=esc(i["reason"])))
+    parts.append("</ul></div>")
     return "".join(parts)
 
 
-def _routing_html(cat_aggs, categorized, bar, disc_bar, optimize="cost"):
-    parts = ['<h2 style="font-size:15px;color:#333">Per-category routing</h2>']
-    if not categorized:
-        parts.append('<p style="color:#8a6d00;font-size:13px">No test carried a '
-                     'category, so per-category routing is absent. Tag tests with '
-                     'metadata.category to enable it.</p>')
-        return "".join(parts)
-    routing = route_by_category(cat_aggs, bar, disc_bar, optimize)
-    pick = ("fastest by median latency" if optimize == "latency"
-            else "cheapest")
-    parts.append('<p style="font-size:13px;color:#333">Send each category to the '
-                 '{} model that clears the bar within it.</p>'.format(pick))
-    parts.append('<table style="border-collapse:collapse;font-size:13px;margin:8px 0">'
-                 '<thead><tr>'
-                 '<th style="text-align:left;padding:4px 12px 4px 0;border-bottom:1px solid #ddd">category</th>'
-                 '<th style="text-align:left;padding:4px 12px 4px 0;border-bottom:1px solid #ddd">recommended model</th>'
-                 '<th style="text-align:right;padding:4px 12px 4px 0;border-bottom:1px solid #ddd">cost/test</th>'
-                 '<th style="text-align:right;padding:4px 0;border-bottom:1px solid #ddd">latency</th>'
-                 '</tr></thead><tbody>')
-    for c in sorted(routing):
-        model, cpt, lat_s = routing[c]
-        if model is None:
-            cell = ('<td style="padding:4px 12px 4px 0;color:#b35900;font-weight:600">'
-                    'NO MODEL CLEARS THE BAR</td>'
-                    '<td style="padding:4px 12px 4px 0;text-align:right;color:#b35900">-</td>'
-                    '<td style="padding:4px 0;text-align:right;color:#b35900">-</td>')
+def _drilldown_html(owner_route, cat_aggs, cat_fails, labels, incumbent):
+    """Per-category <details>, closed by default. Summary = the owner line;
+    expansion = the per-model table for that category plus the DEDUPED floor
+    failures within it."""
+    esc = html.escape
+    parts = ['<h2>Per-category routing</h2>']
+    for c in sorted(cat_aggs):
+        i = owner_route.get(c, {"model": None, "reason": "", "strongest": None})
+        lbl = category_label(c, labels)
+        if i["model"] is None:
+            summ = ('<span class="cat">{cat}</span> <span class="arrow">-></span> '
+                    '<span class="mdl">NO MODEL CLEARS THE BAR</span>'
+                    '<span class="why">{why}</span>').format(
+                        cat=esc(lbl),
+                        why=(" - " + esc(i["reason"])) if i.get("reason") else "")
+            none_attr = ' data-none="1"'
         else:
-            cell = ('<td style="padding:4px 12px 4px 0">{m}</td>'
-                    '<td style="padding:4px 12px 4px 0;text-align:right">{c}</td>'
-                    '<td style="padding:4px 0;text-align:right">{l}</td>').format(
-                        m=html.escape(model), c=html.escape(fmt_cost(cpt)),
-                        l=html.escape(fmt_latency(lat_s)))
-        parts.append('<tr><td style="padding:4px 12px 4px 0">{cat}</td>{cell}</tr>'.format(
-            cat=html.escape(c), cell=cell))
-    parts.append("</tbody></table>")
-    unmet = [c for c in sorted(routing) if routing[c][0] is None]
-    if unmet:
-        parts.append('<p style="color:#b35900;font-size:13px">No model clears the '
-                     'bar in: {}. Raise coverage, lower the bar, or add a stronger '
-                     'model for these.</p>'.format(html.escape(", ".join(unmet))))
+            summ = ('<span class="cat">{cat}</span> <span class="arrow">-></span> '
+                    'run <span class="mdl">{m}</span>'
+                    '<span class="why">({why})</span>').format(
+                        cat=esc(lbl), m=esc(i["model"]), why=esc(i["reason"]))
+            none_attr = ''
+        parts.append('<details class="cat"' + none_attr + '><summary>' + summ + '</summary>')
+        parts.append('<div class="cat-body">')
+        parts.append(_model_table(cat_aggs[c], i["model"], incumbent))
+        fails = cat_fails.get(c, [])
+        if fails:
+            parts.append('<div class="fail-head">Floor tests failed here '
+                         '(deduped across repeats)</div><ul class="fails">')
+            for m, test, nf, runs in sorted(fails):
+                parts.append('<li><b>{m}</b> fails {t} ({nf}/{runs} runs)</li>'.format(
+                    m=esc(m), t=esc(test), nf=nf, runs=runs))
+            parts.append("</ul>")
+        else:
+            parts.append('<p class="clean">Every model cleared every floor test '
+                         'in this category.</p>')
+        parts.append("</div></details>")
+    return "".join(parts)
+
+
+def _suite_health_html(tests, layered):
+    """Deduped suite-health block: floor failures counted per (model, test), and
+    saturated discriminating tests (one line per test)."""
+    esc = html.escape
+    parts = ['<h2>Suite health</h2>']
+    if not layered:
+        parts.append('<p class="note">Tests were not tagged by layer, so no '
+                     'saturation / regression checks were run (they need '
+                     'floor / discriminating tags).</p>')
+        return "".join(parts)
+    saturated, regressions = suite_health(tests)
+    if not saturated and not regressions:
+        parts.append('<p class="clean">No issues: no saturated discriminating '
+                     'tests, and every model cleared every floor test.</p>')
+        return "".join(parts)
+    if regressions:
+        parts.append('<div class="fail-head">Floor failures (regression or '
+                     'coverage gap)</div><ul class="fails">')
+        for m, test, nf, runs in regressions:
+            parts.append('<li><b>{m}</b> fails {t} ({nf}/{runs} runs)</li>'.format(
+                m=esc(m), t=esc(test), nf=nf, runs=runs))
+        parts.append("</ul>")
+    if saturated:
+        parts.append('<div class="fail-head" style="color:#8a6d00">Saturated '
+                     'discriminating tests (no ranking signal; harden or retire)'
+                     '</div><ul class="sat">')
+        for test in saturated:
+            parts.append('<li>' + esc(test) + "</li>")
+        parts.append("</ul>")
     return "".join(parts)
 
 
 def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None,
-                cat_aggs=None, categorized=False, optimize="cost"):
-    pick = ("fastest by median latency" if optimize == "latency"
-            else "cheapest")
-    rec_line = ("Run <b>{}</b>, the {} model that clears the bar.".format(
-        html.escape(rec_model_id), pick) if rec_model_id
-        else "No model clears the bar (floor pass-rate at or above {:.0f}%).".format(bar * 100))
+                cat_aggs=None, categorized=False, optimize="cost", records=None,
+                labels=None):
+    esc = html.escape
+    labels = labels or {}
+    cat_aggs = cat_aggs if cat_aggs is not None else {}
+    owner_route = owner_routing(cat_aggs, bar, disc_bar, optimize)
+    everyday = everyday_pick(owner_route, optimize, agg)
     note = ("" if layered else
-            '<p style="color:#8a6d00;font-size:13px">Tests were not tagged by layer, '
-            'so floor = overall pass-rate and disc = mean score across all tests.</p>')
+            '<p class="note">Tests were not tagged by layer, so floor = overall '
+            'pass-rate and disc = mean score across all tests.</p>')
+
+    if categorized and owner_route:
+        owner = _owner_summary_html(owner_route, everyday, labels, bar, disc_bar, optimize)
+    else:
+        pick = ("fastest by median latency" if optimize == "latency" else "cheapest")
+        line = ("Run <b>{}</b>, the {} model that clears the bar.".format(
+            esc(rec_model_id), pick) if rec_model_id
+            else "No model clears the bar (floor pass-rate at or above "
+                 "{:.0f}%).".format(bar * 100))
+        owner = ('<div class="owner"><p class="headline">' + line + "</p>"
+                 '<p class="why" style="color:#778">No test carried a category, so '
+                 'per-category routing is absent. Tag tests with metadata.category '
+                 'to enable it.</p></div>')
+
     frontier = _svg_frontier(agg, rec_model_id, incumbent, optimize)
-    passbars = _bars(agg, "floor_rate", "Floor pass-rate", fmt_rate, maxval=1.0)
-    costbars = _bars(agg, "cost_per_test", "Cost per test", fmt_cost)
-    # In latency mode also show the median-latency bars (the active metric).
-    if optimize == "latency":
-        costbars += _bars(agg, "latency_s", "Median latency (seconds)", fmt_latency)
-    health = _health_html(tests if tests is not None else {}, layered)
-    routing = _routing_html(cat_aggs if cat_aggs is not None else {}, categorized,
-                            bar, disc_bar, optimize)
+    overall_table = _model_table(agg, rec_model_id, incumbent)
+    if categorized and cat_aggs:
+        cat_fails = category_floor_failures(records or [])
+        drilldown = _drilldown_html(owner_route, cat_aggs, cat_fails, labels, incumbent)
+    else:
+        drilldown = ""
+    health = _suite_health_html(tests if tests is not None else {}, layered)
+    frontier_title = ("Latency vs quality" if optimize == "latency"
+                      else "Cost vs quality")
+    db = ("" if disc_bar <= 0
+          else ", disc score at or above {:.2f}".format(disc_bar))
+
     return """<!doctype html>
-<html><head><meta charset="utf-8"><title>clawhound model recommendation</title></head>
-<body style="font-family:system-ui,sans-serif;max-width:820px;margin:32px auto;color:#111">
-<h1 style="font-size:22px">Which model to run</h1>
-<p style="font-size:16px">{rec}</p>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clawhound model recommendation</title>
+<style>{css}</style></head><body>
+<div class="controls">
+<button onclick="cwAll(true)">Expand all</button>
+<button onclick="cwAll(false)">Collapse all</button>
+</div>
+<div class="wrap">
+<h1>Which model to run</h1>
+{owner}
 {note}
-<h2 style="font-size:15px;color:#333">{frontier_title}</h2>
-{frontier}
-{passbars}
-{costbars}
-{routing}
+<h2>{frontier_title}</h2>
+<div class="chart">{frontier}</div>
+<h2>All models at a glance</h2>
+{overall_table}
+{drilldown}
 {health}
-<p style="color:#777;font-size:12px;margin-top:24px">Bar: floor pass-rate at or above {barp:.0f}%{db}. Generated by clawhound from a promptfoo results file.</p>
+<p class="foot">Bar: floor pass-rate at or above {barp:.0f}%{db}. Generated by clawhound from a promptfoo results file.</p>
+</div>
+<script>function cwAll(o){{document.querySelectorAll('details').forEach(function(d){{d.open=o;}});}}</script>
 </body></html>""".format(
-        rec=rec_line, note=note, frontier=frontier, passbars=passbars, costbars=costbars,
-        routing=routing, health=health, barp=bar * 100,
-        frontier_title=("Latency vs quality" if optimize == "latency" else "Cost vs quality"),
-        db="" if disc_bar <= 0 else ", disc score at or above {:.2f}".format(disc_bar))
+        css=_REPORT_CSS, owner=owner, note=note, frontier=frontier,
+        frontier_title=frontier_title, overall_table=overall_table,
+        drilldown=drilldown, health=health, barp=bar * 100, db=db)
 
 
 # ----------------------------------------------------------------------------
@@ -821,9 +1155,11 @@ def _selftest():
     assert "raw CLV does not prove edge" not in saturated, saturated
     # a floor test all models pass is the alarm working, never "saturated"
     assert "odds axiom deflate/inflate" not in saturated, saturated
-    assert ("anthropic:haiku", "never fabricate a score") in regressions, regressions
+    # regressions are DEDUPED per (model, test) with (fails, runs) counts.
+    assert any(m == "anthropic:haiku" and t == "never fabricate a score"
+               for m, t, _f, _r in regressions), regressions
     # the all-pass floor test must not appear as a regression
-    assert all(t != "odds axiom deflate/inflate" for _, t in regressions), regressions
+    assert all(t != "odds axiom deflate/inflate" for _m, t, _f, _r in regressions), regressions
 
     # Per-category routing: different models win in different categories.
     assert categorized, "sample records should be categorized"
@@ -857,17 +1193,44 @@ def _selftest():
     rec_lat = recommend(agg, 1.0, 0.0, "latency")
     assert rec_lat == "anthropic:opus", rec_lat  # only opus clears overall floor
 
+    # --- dedupe across repeats: a floor test failing on every one of K runs must
+    # appear ONCE as (model, test, K, K), never K separate lines. ------------
+    repeated = _sample_records() + _sample_records() + _sample_records()
+    _sat_r, regs_r = suite_health(aggregate_tests(repeated))
+    fab = [t for t in regs_r if t[1] == "never fabricate a score"]
+    assert len(fab) == 1, fab  # deduped to one row
+    assert fab[0] == ("anthropic:haiku", "never fabricate a score", 3, 3), fab
+
+    # --- owner summary: the everyday pick is the model recommended for the MOST
+    # categories, derived from the routing (never hardcoded). ----------------
+    owner_route = owner_routing(cat_aggs, 1.0, 0.0)
+    assert owner_route["math"]["model"] == "anthropic:opus", owner_route["math"]
+    assert owner_route["math"]["reason"] == "the only model that clears the bar", owner_route["math"]
+    assert owner_route["frontend"]["model"] == "anthropic:haiku", owner_route["frontend"]
+    assert owner_route["frontend"]["reason"] == "cheapest that clears the bar", owner_route["frontend"]
+    assert owner_route["theory"]["model"] is None, owner_route["theory"]
+    assert owner_route["theory"]["strongest"] == "anthropic:opus", owner_route["theory"]
+    # cost mode: math->opus, frontend->haiku (1 each); tie broken by cheaper
+    # overall -> haiku is the everyday pick.
+    everyday = everyday_pick(owner_route, "cost", agg)
+    assert everyday == "anthropic:haiku", everyday
+    # the zoomed y-axis lower bound never starts above 80.
+    assert _frontier_ylo(agg) <= 80, _frontier_ylo(agg)
+
     # HTML report must carry both the suite-health and the routing block.
     doc = render_html(agg, layered, 1.0, 0.0, rec, "anthropic:opus", tests,
-                      cat_aggs, categorized)
+                      cat_aggs, categorized, records=records)
     assert "Suite health" in doc, "suite-health block missing from HTML"
     assert "diagnose devig longshot bias" in doc, "saturated test missing from HTML"
     assert "Per-category routing" in doc, "routing block missing from HTML"
     assert "NO MODEL CLEARS THE BAR" in doc, "no-clear marking missing from HTML"
     assert "Cost vs quality" in doc, "cost-mode frontier title missing from HTML"
+    assert "for everyday work" in doc, "owner headline missing from HTML"
+    assert "Expand all" in doc and "Collapse all" in doc, "collapse-all control missing"
+    assert "<details class=\"cat\"" in doc, "collapsible category detail missing"
     # latency-mode HTML must relabel the frontier and show the latency metric.
     doc_lat = render_html(agg, layered, 1.0, 0.0, rec_lat, "anthropic:opus", tests,
-                          cat_aggs, categorized, optimize="latency")
+                          cat_aggs, categorized, optimize="latency", records=records)
     assert "Latency vs quality" in doc_lat, "latency-mode frontier title missing"
     assert "median latency" in doc_lat, "latency axis label missing from HTML"
     print("\nselftest: OK")
@@ -909,6 +1272,7 @@ def main():
     agg, layered = aggregate(records)
     tests = aggregate_tests(records)
     cat_aggs, categorized = aggregate_by_category(records)
+    labels = load_category_labels(args.results)
     rec = recommend(agg, args.bar, args.disc_bar, args.optimize)
     print_report(agg, layered, args.bar, args.disc_bar, rec, args.incumbent, args.optimize)
     print_routing(cat_aggs, categorized, args.bar, args.disc_bar, args.optimize)
@@ -916,7 +1280,8 @@ def main():
 
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(render_html(agg, layered, args.bar, args.disc_bar, rec,
-                            args.incumbent, tests, cat_aggs, categorized, args.optimize))
+                            args.incumbent, tests, cat_aggs, categorized, args.optimize,
+                            records=records, labels=labels))
     print("\nHTML report: " + args.out)
 
 
