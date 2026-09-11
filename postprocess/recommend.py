@@ -32,8 +32,14 @@ is defensive; validation against a live promptfoo run is still pending.
 
 Usage:
   python recommend.py results.json [--bar 1.0] [--disc-bar 0.0]
+                       [--optimize cost|latency]
                        [--incumbent provider:model] [--out report.html]
   python recommend.py --selftest   # run the built-in sample-results test
+
+--optimize picks the tiebreak AMONG models that clear the bar: cost (default,
+cheapest per test) or latency (fastest by median per-call latency). Latency mode
+suits a flat-rate / subscription user who pays no per-token cost and just wants
+the quickest model that reliably clears the bar. The bar itself is unchanged.
 """
 
 import argparse
@@ -142,6 +148,45 @@ def rec_cost(r):
         return None
 
 
+def rec_latency(r):
+    """Per-call latency in milliseconds, defensively.
+
+    promptfoo records it at the top-level `latencyMs`; older/other shapes carry
+    it under `response.latencyMs` or `metrics.latencyMs`. Returns None when no
+    latency is present or it does not parse as a number.
+    """
+    candidates = [r.get("latencyMs")]
+    resp = r.get("response")
+    if isinstance(resp, dict):
+        candidates.append(resp.get("latencyMs"))
+    met = r.get("metrics")
+    if isinstance(met, dict):
+        candidates.append(met.get("latencyMs"))
+    for c in candidates:
+        if c is None:
+            continue
+        try:
+            return float(c)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _median(vals):
+    """Median of a list of numbers, or None if empty. Robust to outliers, which
+    is why we prefer it over the mean for latency. Note: repeated runs
+    (promptfoo --repeat) make both the pass-rate and the median latency more
+    reliable; this tool just reads whatever samples are in the results file."""
+    xs = sorted(v for v in vals if v is not None)
+    n = len(xs)
+    if n == 0:
+        return None
+    mid = n // 2
+    if n % 2 == 1:
+        return xs[mid]
+    return (xs[mid - 1] + xs[mid]) / 2.0
+
+
 # ----------------------------------------------------------------------------
 # Aggregate per model
 # ----------------------------------------------------------------------------
@@ -155,6 +200,7 @@ def aggregate(records):
             "floor_pass": 0, "floor_n": 0,
             "disc_sum": 0.0, "disc_n": 0,
             "cost_sum": 0.0, "cost_n": 0, "n": 0,
+            "latencies": [],
         })
         a["n"] += 1
         layer = rec_layer(r)
@@ -179,6 +225,9 @@ def aggregate(records):
         if c is not None:
             a["cost_sum"] += c
             a["cost_n"] += 1
+        lat = rec_latency(r)
+        if lat is not None:
+            a["latencies"].append(lat)
 
     out = {}
     for m, a in models.items():
@@ -186,11 +235,17 @@ def aggregate(records):
         disc = (a["disc_sum"] / a["disc_n"]) if a["disc_n"] else None
         # cost per test uses the count of records that reported a cost
         cpt = (a["cost_sum"] / a["cost_n"]) if a["cost_n"] else None
+        # median latency is robust to slow-outlier calls; keep ms and seconds
+        lat_ms = _median(a["latencies"])
+        lat_s = None if lat_ms is None else lat_ms / 1000.0
         out[m] = {
             "floor_rate": floor_rate,
             "disc": disc,
             "cost_per_test": cpt,
             "cost_known": a["cost_n"] > 0,
+            "latency_ms": lat_ms,
+            "latency_s": lat_s,
+            "latency_known": len(a["latencies"]) > 0,
             "n": a["n"],
         }
     return out, layered
@@ -267,7 +322,25 @@ def suite_health(tests):
 # Recommend: cheapest model that clears the bar
 # ----------------------------------------------------------------------------
 
-def recommend(agg, bar, disc_bar):
+def _metric_field(optimize):
+    """Map an --optimize choice to the aggregate field the selection sorts on."""
+    return "latency_ms" if optimize == "latency" else "cost_per_test"
+
+
+def optimize_sort_key(optimize):
+    """Sort key over agg items for the active metric. Lower is better for both
+    cost and latency. Models with an unknown metric value (e.g. local models
+    that report no cost, or results with no latencyMs) sort last, since we
+    cannot claim they are cheapest/fastest without a number."""
+    field = _metric_field(optimize)
+
+    def key(item):
+        v = item[1].get(field)
+        return (v is None, v if v is not None else 0.0)
+    return key
+
+
+def recommend(agg, bar, disc_bar, optimize="cost"):
     def clears(s):
         if s["floor_rate"] is None or s["floor_rate"] < bar:
             return False
@@ -278,12 +351,11 @@ def recommend(agg, bar, disc_bar):
     passers = [(m, s) for m, s in agg.items() if clears(s)]
     if not passers:
         return None
-    # Cheapest first. Models with unknown cost (local / self-hosted) sort last,
-    # since we cannot claim they are cheapest without a number.
-    def cost_key(item):
-        cpt = item[1]["cost_per_test"]
-        return (cpt is None, cpt if cpt is not None else 0.0)
-    passers.sort(key=cost_key)
+    # The "clears the bar" gate above is always the floor pass-rate vs --bar.
+    # The chosen metric (cost or latency) is only the tiebreak/optimization
+    # AMONG models that already clear it. Cheapest (cost) or fastest by median
+    # latency (latency) wins.
+    passers.sort(key=optimize_sort_key(optimize))
     return passers[0][0]
 
 
@@ -315,18 +387,21 @@ def aggregate_by_category(records):
     return out, categorized
 
 
-def route_by_category(cat_aggs, bar, disc_bar):
-    """category -> (recommended model or None, its cost_per_test or None).
+def route_by_category(cat_aggs, bar, disc_bar, optimize="cost"):
+    """category -> (recommended model or None, cost_per_test or None, latency_s or None).
 
-    Reuses recommend() so each category uses the same bar / disc_bar selection
-    logic as the overall recommendation. A None model means no model cleared the
-    bar within that category.
+    Reuses recommend() so each category uses the same bar / disc_bar gate and
+    the same optimize metric as the overall recommendation. A None model means
+    no model cleared the bar within that category. Both cost and latency are
+    returned when known, regardless of which metric drove the selection, so the
+    routing table can show either column.
     """
     routing = {}
     for cat, agg in cat_aggs.items():
-        rec = recommend(agg, bar, disc_bar)
+        rec = recommend(agg, bar, disc_bar, optimize)
         cpt = agg[rec]["cost_per_test"] if (rec and rec in agg) else None
-        routing[cat] = (rec, cpt)
+        lat_s = agg[rec]["latency_s"] if (rec and rec in agg) else None
+        routing[cat] = (rec, cpt, lat_s)
     return routing
 
 
@@ -351,20 +426,24 @@ def fmt_cost(x):
     return "${:.5f}".format(x).rstrip("0").rstrip(".")
 
 
-def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent):
-    rows = sorted(
-        agg.items(),
-        key=lambda kv: (kv[1]["cost_per_test"] is None,
-                        kv[1]["cost_per_test"] if kv[1]["cost_per_test"] is not None else 0.0),
-    )
+def fmt_latency(x):
+    """Median latency in seconds (input is already seconds)."""
+    if x is None:
+        return "n/a"
+    return "{:.3f}".format(x).rstrip("0").rstrip(".") + "s"
+
+
+def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize="cost"):
+    field = _metric_field(optimize)
+    rows = sorted(agg.items(), key=optimize_sort_key(optimize))
     name_w = max([len("model")] + [len(m) for m in agg]) + 2
+    # Always show cost/test when known; the active metric gets its own column.
     header = "{:<{w}} {:>10} {:>8} {:>14} {:>14}".format(
-        "model", "floor", "disc", "cost/test", "cost/1k", w=name_w)
+        "model", "floor", "disc", "cost/test", "latency", w=name_w)
     print(header)
     print("-" * len(header))
     for m, s in rows:
         cpt = s["cost_per_test"]
-        c1k = None if cpt is None else cpt * 1000
         mark = ""
         if m == rec_model_id:
             mark = "  <- recommended"
@@ -372,29 +451,33 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent):
             mark = "  (you are here)"
         print("{:<{w}} {:>10} {:>8} {:>14} {:>14}{}".format(
             m, fmt_rate(s["floor_rate"]), fmt_score(s["disc"]),
-            fmt_cost(cpt), fmt_cost(c1k), mark, w=name_w))
+            fmt_cost(cpt), fmt_latency(s["latency_s"]), mark, w=name_w))
     print()
     if not layered:
         print("Note: tests were not tagged by layer, so floor = overall pass-rate "
               "and disc = mean score across all tests.")
+    metric_word = "fastest by median latency" if optimize == "latency" else "lowest cost"
     if rec_model_id:
         s = agg[rec_model_id]
-        print("Run: {}. Clears the bar (floor {} >= {:.0f}%){} at the lowest cost."
+        print("Run: {}. Clears the bar (floor {} >= {:.0f}%){} at the {}."
               .format(rec_model_id, fmt_rate(s["floor_rate"]), bar * 100,
                       "" if disc_bar <= 0 else ", disc {} >= {:.2f}".format(
-                          fmt_score(s["disc"]), disc_bar)))
+                          fmt_score(s["disc"]), disc_bar),
+                      metric_word))
     else:
         print("No model clears the bar (floor pass-rate >= {:.0f}%{}). "
               "Raise coverage, lower the bar, or add a stronger model."
               .format(bar * 100,
                       "" if disc_bar <= 0 else ", disc >= {:.2f}".format(disc_bar)))
     if incumbent and rec_model_id and incumbent in agg and incumbent != rec_model_id:
-        inc = agg[incumbent]["cost_per_test"]
-        rec = agg[rec_model_id]["cost_per_test"]
+        inc = agg[incumbent].get(field)
+        rec = agg[rec_model_id].get(field)
         if inc is not None and rec is not None and inc > 0:
             save = (1 - rec / inc) * 100
-            print("Versus your current {}: about {:.0f}% cheaper per test at or above your bar."
-                  .format(incumbent, save))
+            better = "faster" if optimize == "latency" else "cheaper"
+            unit = "per test" if optimize == "cost" else "in median latency"
+            print("Versus your current {}: about {:.0f}% {} {} at or above your bar."
+                  .format(incumbent, save, better, unit))
 
 
 def print_health(tests, layered):
@@ -419,7 +502,7 @@ def print_health(tests, layered):
               'gives no ranking signal. Harden or retire it.'.format(test))
 
 
-def print_routing(cat_aggs, categorized, bar, disc_bar):
+def print_routing(cat_aggs, categorized, bar, disc_bar, optimize="cost"):
     print()
     title = "Per-category routing"
     print(title)
@@ -428,26 +511,28 @@ def print_routing(cat_aggs, categorized, bar, disc_bar):
         print("No test carried a category, so per-category routing is absent. "
               "Tag tests with metadata.category to enable it.")
         return
-    routing = route_by_category(cat_aggs, bar, disc_bar)
+    routing = route_by_category(cat_aggs, bar, disc_bar, optimize)
     cats = sorted(routing)
     cat_w = max([len("category")] + [len(c) for c in cats]) + 2
     mdl_w = max([len("model")]
-                + [len(m) for m, _ in routing.values() if m]) + 2
-    header = "{:<{cw}} {:<{mw}} {:>14}".format(
-        "category", "model", "cost/test", cw=cat_w, mw=mdl_w)
+                + [len(t[0]) for t in routing.values() if t[0]]) + 2
+    header = "{:<{cw}} {:<{mw}} {:>14} {:>14}".format(
+        "category", "model", "cost/test", "latency", cw=cat_w, mw=mdl_w)
     print(header)
     print("-" * len(header))
     for c in cats:
-        model, cpt = routing[c]
+        model, cpt, lat_s = routing[c]
         if model is None:
-            print("{:<{cw}} {:<{mw}} {:>14}".format(
-                c, "NO MODEL CLEARS THE BAR", "-", cw=cat_w, mw=mdl_w))
+            print("{:<{cw}} {:<{mw}} {:>14} {:>14}".format(
+                c, "NO MODEL CLEARS THE BAR", "-", "-", cw=cat_w, mw=mdl_w))
         else:
-            print("{:<{cw}} {:<{mw}} {:>14}".format(
-                c, model, fmt_cost(cpt), cw=cat_w, mw=mdl_w))
+            print("{:<{cw}} {:<{mw}} {:>14} {:>14}".format(
+                c, model, fmt_cost(cpt), fmt_latency(lat_s), cw=cat_w, mw=mdl_w))
     print()
+    pick = ("fastest by median latency that clears the bar, "
+            if optimize == "latency" else "cheapest that clears the bar, ")
     print("Routing policy: send each category to the model shown ({}floor >= {:.0f}%{})."
-          .format("cheapest that clears the bar, ", bar * 100,
+          .format(pick, bar * 100,
                   "" if disc_bar <= 0 else ", disc >= {:.2f}".format(disc_bar)))
     unmet = [c for c in cats if routing[c][0] is None]
     if unmet:
@@ -459,16 +544,19 @@ def print_routing(cat_aggs, categorized, bar, disc_bar):
 # HTML report with inline SVG frontier (no external libraries)
 # ----------------------------------------------------------------------------
 
-def _svg_frontier(agg, rec_model_id, incumbent):
-    pts = [(m, s) for m, s in agg.items() if s["cost_per_test"] is not None]
+def _svg_frontier(agg, rec_model_id, incumbent, optimize="cost"):
+    latency = (optimize == "latency")
+    field = "latency_s" if latency else "cost_per_test"
+    axis_word = "median latency" if latency else "cost"
+    pts = [(m, s) for m, s in agg.items() if s.get(field) is not None]
     W, H = 720, 420
     ml, mr, mt, mb = 70, 30, 30, 60
     pw, ph = W - ml - mr, H - mt - mb
     if not pts:
         return ('<svg width="{w}" height="80"><text x="10" y="45" '
-                'font-family="system-ui" font-size="14">No models reported a cost; '
-                'nothing to plot on the cost axis.</text></svg>').format(w=W)
-    max_cost = max(s["cost_per_test"] for _, s in pts) or 1e-9
+                'font-family="system-ui" font-size="14">No models reported a {a}; '
+                'nothing to plot on the {a} axis.</text></svg>').format(w=W, a=axis_word)
+    max_cost = max(s[field] for _, s in pts) or 1e-9
     max_cost *= 1.15
 
     def px(c):
@@ -494,21 +582,24 @@ def _svg_frontier(agg, rec_model_id, incumbent):
             x=ml, y=y, r=ml + pw))
         parts.append('<text x="{x}" y="{y}" font-size="11" fill="#555" '
                      'text-anchor="end">{v:.0f}%</text>'.format(x=ml - 8, y=y + 4, v=r * 100))
-    # x labels (cost)
+    # x labels (active metric: cost per test, or median latency in seconds)
     for i in range(0, 5):
         c = max_cost * i / 4.0
         x = px(c)
+        lbl = "{v:.3f}s".format(v=c) if latency else "${v:.4f}".format(v=c)
         parts.append('<text x="{x}" y="{y}" font-size="11" fill="#555" '
-                     'text-anchor="middle">${v:.4f}</text>'.format(x=x, y=mt + ph + 18, v=c))
+                     'text-anchor="middle">{l}</text>'.format(x=x, y=mt + ph + 18, l=lbl))
+    axis_title = ("median latency per test (seconds)" if latency
+                  else "cost per test (USD)")
     parts.append('<text x="{x}" y="{y}" font-size="12" fill="#333" '
-                 'text-anchor="middle">cost per test (USD)</text>'.format(
-                     x=ml + pw / 2, y=H - 12))
+                 'text-anchor="middle">{t}</text>'.format(
+                     x=ml + pw / 2, y=H - 12, t=axis_title))
     parts.append('<text transform="translate(16,{y}) rotate(-90)" font-size="12" '
                  'fill="#333" text-anchor="middle">floor pass-rate</text>'.format(
                      y=mt + ph / 2))
     # dots
     for m, s in pts:
-        x, y = px(s["cost_per_test"]), py(s["floor_rate"])
+        x, y = px(s[field]), py(s["floor_rate"])
         recommended = (m == rec_model_id)
         is_inc = (incumbent and m == incumbent)
         color = "#1a7f37" if recommended else ("#8250df" if is_inc else "#0969da")
@@ -588,32 +679,38 @@ def _health_html(tests, layered):
     return "".join(parts)
 
 
-def _routing_html(cat_aggs, categorized, bar, disc_bar):
+def _routing_html(cat_aggs, categorized, bar, disc_bar, optimize="cost"):
     parts = ['<h2 style="font-size:15px;color:#333">Per-category routing</h2>']
     if not categorized:
         parts.append('<p style="color:#8a6d00;font-size:13px">No test carried a '
                      'category, so per-category routing is absent. Tag tests with '
                      'metadata.category to enable it.</p>')
         return "".join(parts)
-    routing = route_by_category(cat_aggs, bar, disc_bar)
+    routing = route_by_category(cat_aggs, bar, disc_bar, optimize)
+    pick = ("fastest by median latency" if optimize == "latency"
+            else "cheapest")
     parts.append('<p style="font-size:13px;color:#333">Send each category to the '
-                 'cheapest model that clears the bar within it.</p>')
+                 '{} model that clears the bar within it.</p>'.format(pick))
     parts.append('<table style="border-collapse:collapse;font-size:13px;margin:8px 0">'
                  '<thead><tr>'
                  '<th style="text-align:left;padding:4px 12px 4px 0;border-bottom:1px solid #ddd">category</th>'
                  '<th style="text-align:left;padding:4px 12px 4px 0;border-bottom:1px solid #ddd">recommended model</th>'
-                 '<th style="text-align:right;padding:4px 0;border-bottom:1px solid #ddd">cost/test</th>'
+                 '<th style="text-align:right;padding:4px 12px 4px 0;border-bottom:1px solid #ddd">cost/test</th>'
+                 '<th style="text-align:right;padding:4px 0;border-bottom:1px solid #ddd">latency</th>'
                  '</tr></thead><tbody>')
     for c in sorted(routing):
-        model, cpt = routing[c]
+        model, cpt, lat_s = routing[c]
         if model is None:
             cell = ('<td style="padding:4px 12px 4px 0;color:#b35900;font-weight:600">'
                     'NO MODEL CLEARS THE BAR</td>'
+                    '<td style="padding:4px 12px 4px 0;text-align:right;color:#b35900">-</td>'
                     '<td style="padding:4px 0;text-align:right;color:#b35900">-</td>')
         else:
             cell = ('<td style="padding:4px 12px 4px 0">{m}</td>'
-                    '<td style="padding:4px 0;text-align:right">{c}</td>').format(
-                        m=html.escape(model), c=html.escape(fmt_cost(cpt)))
+                    '<td style="padding:4px 12px 4px 0;text-align:right">{c}</td>'
+                    '<td style="padding:4px 0;text-align:right">{l}</td>').format(
+                        m=html.escape(model), c=html.escape(fmt_cost(cpt)),
+                        l=html.escape(fmt_latency(lat_s)))
         parts.append('<tr><td style="padding:4px 12px 4px 0">{cat}</td>{cell}</tr>'.format(
             cat=html.escape(c), cell=cell))
     parts.append("</tbody></table>")
@@ -626,26 +723,31 @@ def _routing_html(cat_aggs, categorized, bar, disc_bar):
 
 
 def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None,
-                cat_aggs=None, categorized=False):
-    rec_line = ("Run <b>{}</b>, the cheapest model that clears the bar.".format(
-        html.escape(rec_model_id)) if rec_model_id
+                cat_aggs=None, categorized=False, optimize="cost"):
+    pick = ("fastest by median latency" if optimize == "latency"
+            else "cheapest")
+    rec_line = ("Run <b>{}</b>, the {} model that clears the bar.".format(
+        html.escape(rec_model_id), pick) if rec_model_id
         else "No model clears the bar (floor pass-rate at or above {:.0f}%).".format(bar * 100))
     note = ("" if layered else
             '<p style="color:#8a6d00;font-size:13px">Tests were not tagged by layer, '
             'so floor = overall pass-rate and disc = mean score across all tests.</p>')
-    frontier = _svg_frontier(agg, rec_model_id, incumbent)
+    frontier = _svg_frontier(agg, rec_model_id, incumbent, optimize)
     passbars = _bars(agg, "floor_rate", "Floor pass-rate", fmt_rate, maxval=1.0)
     costbars = _bars(agg, "cost_per_test", "Cost per test", fmt_cost)
+    # In latency mode also show the median-latency bars (the active metric).
+    if optimize == "latency":
+        costbars += _bars(agg, "latency_s", "Median latency (seconds)", fmt_latency)
     health = _health_html(tests if tests is not None else {}, layered)
     routing = _routing_html(cat_aggs if cat_aggs is not None else {}, categorized,
-                            bar, disc_bar)
+                            bar, disc_bar, optimize)
     return """<!doctype html>
 <html><head><meta charset="utf-8"><title>clawhound model recommendation</title></head>
 <body style="font-family:system-ui,sans-serif;max-width:820px;margin:32px auto;color:#111">
 <h1 style="font-size:22px">Which model to run</h1>
 <p style="font-size:16px">{rec}</p>
 {note}
-<h2 style="font-size:15px;color:#333">Cost vs quality</h2>
+<h2 style="font-size:15px;color:#333">{frontier_title}</h2>
 {frontier}
 {passbars}
 {costbars}
@@ -655,6 +757,7 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
 </body></html>""".format(
         rec=rec_line, note=note, frontier=frontier, passbars=passbars, costbars=costbars,
         routing=routing, health=health, barp=bar * 100,
+        frontier_title=("Latency vs quality" if optimize == "latency" else "Cost vs quality"),
         db="" if disc_bar <= 0 else ", disc score at or above {:.2f}".format(disc_bar))
 
 
@@ -664,7 +767,11 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
 # ----------------------------------------------------------------------------
 
 def _sample_records():
-    def rec(model, test, layer, success, score, cost, category):
+    # latency_ms lets the same fixtures exercise --optimize latency. The key
+    # divergence: opus is PRICIER but FASTER, haiku is CHEAPER but SLOWER. So in
+    # a category both clear, cost mode picks haiku (cheap) and latency mode picks
+    # opus (fast) -- the two metrics select different models.
+    def rec(model, test, layer, success, score, cost, category, latency_ms):
         return {
             "provider": {"id": model},
             "testCase": {"description": test,
@@ -672,27 +779,30 @@ def _sample_records():
             "success": success,
             "score": score,
             "cost": cost,
+            "latencyMs": latency_ms,
         }
 
+    # opus: expensive (0.02) but fast (500 ms). haiku: cheap (0.002) but slow (3000 ms).
     recs = []
     # --- category "math": a floor test only the EXPENSIVE model clears --------
     # A floor test EVERY model passes: this is the alarm working, must NOT flag.
-    recs.append(rec("anthropic:opus", "odds axiom deflate/inflate", "floor", True, 1.0, 0.02, "math"))
-    recs.append(rec("anthropic:haiku", "odds axiom deflate/inflate", "floor", True, 1.0, 0.002, "math"))
+    recs.append(rec("anthropic:opus", "odds axiom deflate/inflate", "floor", True, 1.0, 0.02, "math", 500))
+    recs.append(rec("anthropic:haiku", "odds axiom deflate/inflate", "floor", True, 1.0, 0.002, "math", 3000))
     # A floor test one model FAILS: regression / coverage gap flag. Because haiku
     # fails a math floor test, only opus clears the bar in "math" -> math routes opus.
-    recs.append(rec("anthropic:opus", "never fabricate a score", "floor", True, 1.0, 0.02, "math"))
-    recs.append(rec("anthropic:haiku", "never fabricate a score", "floor", False, 0.0, 0.002, "math"))
-    # --- category "frontend": both clear, so the CHEAP model wins on cost -----
-    recs.append(rec("anthropic:opus", "tailwind slate palette copy", "floor", True, 1.0, 0.02, "frontend"))
-    recs.append(rec("anthropic:haiku", "tailwind slate palette copy", "floor", True, 1.0, 0.002, "frontend"))
+    recs.append(rec("anthropic:opus", "never fabricate a score", "floor", True, 1.0, 0.02, "math", 500))
+    recs.append(rec("anthropic:haiku", "never fabricate a score", "floor", False, 0.0, 0.002, "math", 3000))
+    # --- category "frontend": both clear the floor. This is the divergence case:
+    # cost mode -> haiku (cheaper), latency mode -> opus (faster). ------------
+    recs.append(rec("anthropic:opus", "tailwind slate palette copy", "floor", True, 1.0, 0.02, "frontend", 500))
+    recs.append(rec("anthropic:haiku", "tailwind slate palette copy", "floor", True, 1.0, 0.002, "frontend", 3000))
     # --- category "theory": discriminating-only, so nobody has a floor bar ----
     # A discriminating test EVERY model passes (score >= 0.5): saturated flag.
-    recs.append(rec("anthropic:opus", "diagnose devig longshot bias", "discriminating", True, 0.85, 0.02, "theory"))
-    recs.append(rec("anthropic:haiku", "diagnose devig longshot bias", "discriminating", True, 0.72, 0.002, "theory"))
+    recs.append(rec("anthropic:opus", "diagnose devig longshot bias", "discriminating", True, 0.85, 0.02, "theory", 500))
+    recs.append(rec("anthropic:haiku", "diagnose devig longshot bias", "discriminating", True, 0.72, 0.002, "theory", 3000))
     # A discriminating test that still SPLITS the models: healthy, must NOT flag.
-    recs.append(rec("anthropic:opus", "raw CLV does not prove edge", "discriminating", True, 0.78, 0.02, "theory"))
-    recs.append(rec("anthropic:haiku", "raw CLV does not prove edge", "discriminating", False, 0.30, 0.002, "theory"))
+    recs.append(rec("anthropic:opus", "raw CLV does not prove edge", "discriminating", True, 0.78, 0.02, "theory", 500))
+    recs.append(rec("anthropic:haiku", "raw CLV does not prove edge", "discriminating", False, 0.30, 0.002, "theory", 3000))
     return recs
 
 
@@ -726,6 +836,27 @@ def _selftest():
     assert routing["frontend"][1] == 0.002, routing
     # theory: discriminating-only, no floor bar to clear, so nobody is routed.
     assert routing["theory"][0] is None, routing
+
+    # --- latency mode: the gate is the SAME (floor pass-rate) but the tiebreak
+    # is median latency, so among models that clear it the FASTEST wins. -------
+    # Median latency must be captured per model and per category (in seconds).
+    assert agg["anthropic:opus"]["latency_s"] == 0.5, agg["anthropic:opus"]
+    assert agg["anthropic:haiku"]["latency_s"] == 3.0, agg["anthropic:haiku"]
+    routing_lat = route_by_category(cat_aggs, 1.0, 0.0, "latency")
+    # frontend: both clear the floor. Cost mode picked the CHEAP haiku above;
+    # latency mode must pick the FAST opus instead. Same gate, different metric.
+    assert routing["frontend"][0] == "anthropic:haiku", routing
+    assert routing_lat["frontend"][0] == "anthropic:opus", routing_lat
+    # the returned latency column must be opus's median latency in seconds.
+    assert routing_lat["frontend"][2] == 0.5, routing_lat
+    # math: only opus clears the floor, so the metric cannot change the pick.
+    assert routing_lat["math"][0] == "anthropic:opus", routing_lat
+    # theory: nobody clears a floor bar, so latency mode routes nobody either.
+    assert routing_lat["theory"][0] is None, routing_lat
+    # overall recommendation must also respect the metric among floor-clearers.
+    rec_lat = recommend(agg, 1.0, 0.0, "latency")
+    assert rec_lat == "anthropic:opus", rec_lat  # only opus clears overall floor
+
     # HTML report must carry both the suite-health and the routing block.
     doc = render_html(agg, layered, 1.0, 0.0, rec, "anthropic:opus", tests,
                       cat_aggs, categorized)
@@ -733,6 +864,12 @@ def _selftest():
     assert "diagnose devig longshot bias" in doc, "saturated test missing from HTML"
     assert "Per-category routing" in doc, "routing block missing from HTML"
     assert "NO MODEL CLEARS THE BAR" in doc, "no-clear marking missing from HTML"
+    assert "Cost vs quality" in doc, "cost-mode frontier title missing from HTML"
+    # latency-mode HTML must relabel the frontier and show the latency metric.
+    doc_lat = render_html(agg, layered, 1.0, 0.0, rec_lat, "anthropic:opus", tests,
+                          cat_aggs, categorized, optimize="latency")
+    assert "Latency vs quality" in doc_lat, "latency-mode frontier title missing"
+    assert "median latency" in doc_lat, "latency axis label missing from HTML"
     print("\nselftest: OK")
 
 
@@ -746,6 +883,12 @@ def main():
                     help="floor pass-rate a model must clear (default 1.0)")
     ap.add_argument("--disc-bar", type=float, default=0.0,
                     help="optional minimum discriminating score (default 0, off)")
+    ap.add_argument("--optimize", choices=("cost", "latency"), default="cost",
+                    help="among models that clear the bar, pick the CHEAPEST "
+                         "(cost, default) or the FASTEST by median latency "
+                         "(latency). Latency suits a flat-rate user who pays no "
+                         "per-token cost and just wants the quickest model that "
+                         "reliably clears the bar. The bar itself is unchanged.")
     ap.add_argument("--incumbent", default=None,
                     help="provider:model you run today, marked 'you are here'")
     ap.add_argument("--out", default="report.html", help="HTML report path")
@@ -766,14 +909,14 @@ def main():
     agg, layered = aggregate(records)
     tests = aggregate_tests(records)
     cat_aggs, categorized = aggregate_by_category(records)
-    rec = recommend(agg, args.bar, args.disc_bar)
-    print_report(agg, layered, args.bar, args.disc_bar, rec, args.incumbent)
-    print_routing(cat_aggs, categorized, args.bar, args.disc_bar)
+    rec = recommend(agg, args.bar, args.disc_bar, args.optimize)
+    print_report(agg, layered, args.bar, args.disc_bar, rec, args.incumbent, args.optimize)
+    print_routing(cat_aggs, categorized, args.bar, args.disc_bar, args.optimize)
     print_health(tests, layered)
 
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(render_html(agg, layered, args.bar, args.disc_bar, rec,
-                            args.incumbent, tests, cat_aggs, categorized))
+                            args.incumbent, tests, cat_aggs, categorized, args.optimize))
     print("\nHTML report: " + args.out)
 
 
