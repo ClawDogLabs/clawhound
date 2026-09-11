@@ -60,10 +60,22 @@ the matrix rank models; a suite of only floor cases saturates and ranks nothing.
 Fresh generation is the default, but only when the target repo has NO suite yet.
 When a suite already exists, switch modes: augment it, never rewrite it.
 
+Augment runs in one of two scopes:
+- **Broad** (no focus given): re-mine the whole repo for anything the current suite
+  misses. An occasional top-up, or a way to catch first-pass gaps.
+- **Focused** (a focus given): the human names a specific target, a feature just
+  shipped, a rule the suite missed, a file or subsystem. Mine ONLY that and propose
+  cases for it. This is the common case: you shipped X, so add tests for X.
+
+Both scopes follow the same discipline below; a focus just narrows what you read in
+step 2.
+
 1. **Read the existing suite first.** Load the project's `promptfooconfig.yaml` (and
    any committed baseline) before mining. You are extending a living artifact, not
    starting from a blank file.
-2. **Mine as usual**, then diff against what is already covered.
+2. **Mine the scope.** Broad: mine the repo as in fresh generation. Focused: read
+   only the named feature, files, or area (plus the rules that bear on it). Then
+   diff against what the suite already covers.
 3. **Propose ONLY net-new cases.** Dedupe by what each test COVERS, not by exact
    text: a new case that checks the same rule, gotcha, or reasoning as an existing
    one is a duplicate even when the prompt is worded differently. Drop it. A case
