@@ -40,6 +40,32 @@ root) so every service is represented and gets its own routing verdict. A
 single-repo project can instead categorize by topic. Either way, no test ships
 without a layer, a category, AND a plain summary.
 
+## Category sidecar (`categories.yaml`)
+
+Alongside `promptfooconfig.yaml`, the miner emits a `categories.yaml` sidecar, one
+entry per category:
+
+```yaml
+categories:
+  <category-name>:
+    label: <what the service IS, e.g. "data layer", "API layer">
+    graded_on: <the competence the model is judged on for this service>
+```
+
+`graded_on` is phrased to follow "models are graded on how well they ...", so
+`postprocess/digest.py` prints one line per category, `<label>: models are graded on
+<graded_on>.`, as a header over that group of tests (a `.cat-desc` line inside the
+collapsed category in `--html`, and a line under the `== category (N) ==` header in
+the terminal view). The sidecar is optional to the renderer: a category with no entry
+renders no header line and raises no error.
+
+Treat `graded_on` as a statement of COVERAGE INTENT, not just a label. It names the
+competences the category's tests are meant to check, so any competence it names that no
+test actually exercises is a visible gap the reviewer should catch. If the relay
+`graded_on` claims the category covers error codes, rate limits, and nulls but no test
+checks them, the sidecar has advertised a hole in the suite. Write it as honest scope,
+then make the tests earn it.
+
 ## Plain summary (tag every test, alongside layer and category)
 
 Every test also carries `metadata.plain`: a jargon-free, business-owner-readable

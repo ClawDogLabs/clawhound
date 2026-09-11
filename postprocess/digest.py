@@ -160,6 +160,8 @@ details.cat { border: 1px solid #d7dce4; border-radius: 8px; background: #fff;
 details.cat > summary { font-size: 1.12rem; font-weight: 600; padding: .8rem 1rem;
   cursor: pointer; background: #fbfcfe; }
 details.cat > summary .count { color: #889; font-weight: 500; }
+.cat-desc { color: #667; font-size: .82rem; padding: .1rem 1rem .5rem;
+  margin: 0; border-bottom: 1px solid #eef0f4; }
 .layer { padding: 0 1rem; }
 .layer h3 { font-size: .74rem; text-transform: uppercase; letter-spacing: .05em;
   color: #667; margin: .9rem 0 .3rem; }
@@ -198,7 +200,47 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, Menlo, monospace;
 _LAYER_ORDER = ("floor", "discriminating", "unlayered")
 
 
-def render_html(config_path, tests, groups, prompt_wrapper):
+def load_category_descs(config_path):
+    """Read an OPTIONAL <config-dir>/categories.yaml sidecar.
+
+    Schema: categories: { <name>: { label: <str>, graded_on: <str> } }.
+    Returns a dict {category-name: {"label": ..., "graded_on": ...}}. Absent
+    file, unreadable file, or malformed content yields {} (never raises), so a
+    missing sidecar just means no description lines render.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(config_path)), "categories.yaml")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        return {}
+    cats = (d or {}).get("categories") if isinstance(d, dict) else None
+    if not isinstance(cats, dict):
+        return {}
+    out = {}
+    for name, entry in cats.items():
+        if isinstance(entry, dict):
+            out[name] = entry
+    return out
+
+
+def category_desc_text(entry):
+    """Plain one-line description for a category, or None when unavailable.
+
+    Text: '<label>: models are graded on <graded_on>.'
+    """
+    if not isinstance(entry, dict):
+        return None
+    label = entry.get("label")
+    graded_on = entry.get("graded_on")
+    if not label or not graded_on:
+        return None
+    return str(label) + ": models are graded on " + str(graded_on) + "."
+
+
+def render_html(config_path, tests, groups, prompt_wrapper, cat_descs=None):
     """Deterministic progressive-disclosure HTML for the suite (no LLM involved)."""
     esc = html.escape
     n_tests = len(tests)
@@ -242,12 +284,16 @@ def render_html(config_path, tests, groups, prompt_wrapper):
             "The per-test prompt is the <code>{{input}}</code> shown in each expansion.</div>"
         )
 
+    cat_descs = cat_descs or {}
     for cat in sorted(groups):
         n = sum(len(v) for v in groups[cat].values())
-        out.append('<details class="cat" open>')
+        out.append('<details class="cat">')
         out.append(
             "<summary>" + esc(cat) + ' <span class="count">(' + str(n) + ")</span></summary>"
         )
+        desc_text = category_desc_text(cat_descs.get(cat))
+        if desc_text:
+            out.append('<p class="cat-desc">' + esc(desc_text) + "</p>")
         for layer in _LAYER_ORDER:
             ts = groups[cat].get(layer)
             if not ts:
@@ -317,6 +363,8 @@ def main():
         layer = meta.get("layer", "unlayered")
         groups.setdefault(cat, {}).setdefault(layer, []).append(t)
 
+    cat_descs = load_category_descs(args.config)
+
     if args.html:
         prompts = (d or {}).get("prompts", []) or []
         prompt_wrapper = ""
@@ -326,7 +374,7 @@ def main():
         out_path = args.out or os.path.join(
             os.path.dirname(os.path.abspath(args.config)), "digest.html"
         )
-        doc = render_html(args.config, tests, groups, prompt_wrapper)
+        doc = render_html(args.config, tests, groups, prompt_wrapper, cat_descs)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(doc)
         print("wrote " + out_path + " (" + str(len(tests)) + " tests, "
@@ -342,6 +390,9 @@ def main():
     for cat in sorted(groups):
         n = sum(len(v) for v in groups[cat].values())
         print("== " + cat + " (" + str(n) + ") ==")
+        desc_text = category_desc_text(cat_descs.get(cat))
+        if desc_text:
+            print("    " + desc_text)
         for layer in ("floor", "discriminating", "unlayered"):
             ts = groups[cat].get(layer)
             if not ts:

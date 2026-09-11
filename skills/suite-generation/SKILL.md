@@ -32,6 +32,34 @@ test with no `plain` falls back to its technical description in that top line,
 which is exactly the jargon a non-technical reader cannot follow, so treat a
 missing `plain` as an incomplete test.
 
+## Emit a `categories.yaml` sidecar (alongside the config)
+
+Write a `categories.yaml` next to `promptfooconfig.yaml`, one entry per category:
+
+```yaml
+categories:
+  <category-name>:
+    label: <what the service IS, e.g. "data layer", "API layer">
+    graded_on: <the competence the model is judged on for this service>
+```
+
+`graded_on` is phrased to follow the words "models are graded on how well they ...",
+so `digest.py` renders one line per category, `<label>: models are graded on
+<graded_on>.`, as the reviewer's header for that whole group of tests.
+
+`graded_on` doubles as a statement of COVERAGE INTENT: it names the competences this
+category's tests are supposed to check. That makes any competence it names but the
+tests do not actually exercise a visible, loud gap the reviewer should catch. Example:
+if the relay `graded_on` says the category covers handling error codes, rate limits,
+and nulls, and no test in that category actually checks any of those, the sidecar has
+just advertised a gap. Write `graded_on` as the honest scope you intend to cover, then
+make sure the tests earn it (or say plainly in the report which parts are not yet
+covered).
+
+The sidecar is optional to the renderer (a category with no entry just gets no header
+line, no error), but the miner should always emit it so every category carries its
+label and grading intent.
+
 ## Step 0: SURVEY the whole tree first (mandatory, before any mining)
 
 Before you read a single rule, SURVEY the entire project tree and write down every
