@@ -42,6 +42,20 @@ HARDEST reasoning, the tasks that separate a strong model from a weak one. Use
 weaker model visibly scores lower rather than flatly failing. These are what let
 the matrix rank models; a suite of only floor cases saturates and ranks nothing.
 
+## promptfoo assertion gotchas (do this, learned from real runs)
+
+- **Quote every `g-eval` and `llm-rubric` criterion.** A `": "` inside an unquoted
+  YAML list item makes YAML parse it as a mapping, not a string, and promptfoo
+  rejects it ("g-eval assertion type must have a string or array of strings value").
+  Write each criterion quoted: `- "Recommends a ruler: realized ROI"`.
+- **Never gate a floor case on a bare `regex` / `not-regex` that a correct answer
+  could trip by accident.** A `not-regex` on a rival option fails a right answer that
+  names it while explaining; a `not-regex` on a forbidden string fails an answer that
+  cites it only to reject it. Reserve raw regex for mechanical checks (an exact
+  number, the em/en dash glyphs, a required literal); for anything an explanation
+  could contain, use an `llm-rubric` that judges what the answer DOES, not which
+  strings it happens to mention.
+
 ## Cautions (state these to the human, do not skip them)
 
 - **Circularity.** You are drafting tests from what the repo already "knows," so a

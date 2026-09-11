@@ -36,6 +36,20 @@ it is cheaper, faster, and not subject to judge noise. Reserve the graded judge
 for genuine reasoning. Hold the judge model constant (set it once in
 `defaultTest.options.provider`) so it is never a moving variable.
 
+## Assertion gotchas (from real runs)
+
+- **Quote every `g-eval` and `llm-rubric` criterion string.** A `": "` inside an
+  unquoted YAML list item makes YAML read it as a mapping, not a string, and
+  promptfoo rejects it: "g-eval assertion type must have a string or array of
+  strings value." Wrap each criterion: `- "Recommends a ruler: realized ROI"`.
+- **Do not put a bare `regex` / `not-regex` where a correct answer could contain the
+  pattern by accident.** A `not-regex` on a rival tier name fails a right answer that
+  names the tier while explaining; a `not-regex` on a forbidden address fails an
+  answer that names it only to reject it. Keep raw regex for truly mechanical checks
+  (an exact number, the em/en dash glyphs, a required literal). For anything an
+  explanation could trip, use an `llm-rubric` that judges what the answer DOES, not
+  which strings it happens to mention.
+
 ## Weights and thresholds
 
 promptfoo scores a test by the weighted combination of its assertions and marks
