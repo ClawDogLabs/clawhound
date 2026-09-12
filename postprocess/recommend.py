@@ -5,8 +5,11 @@ promptfoo runs the evals across every provider and shows you the numbers. It
 does not DECIDE. This reads `promptfoo eval --output results.json` and answers
 the question a buyer actually has: which model should I run, does it clear my
 bar, and what does it cost. It prints a ranked table and a recommendation, and
-writes a self-contained HTML report whose centerpiece is a cost-vs-quality
-frontier (inline SVG, no external libraries, opens in any browser).
+writes a self-contained HTML report whose centerpiece is a pair of side-by-side
+frontiers, cost-vs-quality and latency-vs-quality, sharing one model color
+legend and one zoomed pass-rate axis (inline SVG, no external libraries, opens
+in any browser). The per-service routing table shows BOTH the cheapest and the
+fastest model that clears the bar for each category.
 
 Alongside the per-model view it prints a per-TEST "Suite health" view (also in
 the HTML report), which turns the matrix on its side to grade the TESTS: a
@@ -36,10 +39,10 @@ Usage:
                        [--incumbent provider:model] [--out report.html]
   python recommend.py --selftest   # run the built-in sample-results test
 
---optimize picks the tiebreak AMONG models that clear the bar: cost (default,
-cheapest per test) or latency (fastest by median per-call latency). Latency mode
-suits a flat-rate / subscription user who pays no per-token cost and just wants
-the quickest model that reliably clears the bar. The bar itself is unchanged.
+--optimize now only sets which lens the owner HEADLINE leads with: cost (default,
+cheapest that clears the bar) or latency (fastest by median per-call latency).
+The HTML report ALWAYS renders both frontier charts and both per-service routing
+picks (cheapest and fastest) regardless of this choice. The bar is unchanged.
 """
 
 import argparse
@@ -413,6 +416,20 @@ def route_by_category(cat_aggs, bar, disc_bar, optimize="cost"):
     return routing
 
 
+def dual_routing(cat_aggs, bar, disc_bar):
+    """{category: {"cheapest": (model, cpt, lat_s), "fastest": (model, cpt, lat_s)}}.
+
+    Runs the SAME route selection once per metric. The set of models that CLEAR
+    the bar is identical for both lenses (the gate is the floor pass-rate, which
+    is metric independent); only the tiebreak differs. So cheapest and fastest
+    can name DIFFERENT models when more than one model clears within a category,
+    and always name the same model when exactly one clears (or none).
+    """
+    cost = route_by_category(cat_aggs, bar, disc_bar, "cost")
+    lat = route_by_category(cat_aggs, bar, disc_bar, "latency")
+    return {c: {"cheapest": cost[c], "fastest": lat[c]} for c in cat_aggs}
+
+
 # ----------------------------------------------------------------------------
 # Category labels (optional sidecar) + owner-summary derivation
 # ----------------------------------------------------------------------------
@@ -712,22 +729,53 @@ def _frontier_ylo(agg):
     return min(80, int(math.floor(min(rates) * 100)))
 
 
-def _svg_frontier(agg, rec_model_id, incumbent, optimize="cost"):
-    latency = (optimize == "latency")
+# One color per MODEL, shared by both frontier charts and the shared legend, so
+# the same model is the same color everywhere. Greens and purples are held back
+# for the winner / incumbent RING markers, so they are intentionally absent here.
+_MODEL_PALETTE = [
+    "#0969da", "#bc4c00", "#bf3989", "#d1242f",
+    "#9a6700", "#1b7c83", "#953800", "#57606a",
+]
+
+_WIN_RING = "#1a7f37"   # green ring = the pick for THIS chart's metric
+_INC_RING = "#8250df"   # purple dashed ring = incumbent, "you are here"
+
+
+def _model_colors(agg):
+    """Stable {model: color} map. Sorted by model id for determinism; the palette
+    cycles when there are more models than colors. Used identically by both
+    frontier charts and the single shared legend, so a model's color is the same
+    on the cost chart, the latency chart, and in the legend."""
+    return {m: _MODEL_PALETTE[i % len(_MODEL_PALETTE)]
+            for i, m in enumerate(sorted(agg))}
+
+
+def _svg_frontier_plot(agg, colors, metric, ringed, incumbent, ylo):
+    """One plot-only frontier SVG (no legend; the legend is shared across both
+    charts and rendered once beside them).
+
+    metric    'cost' -> x is cost per test; 'latency' -> x is median latency (s).
+    ringed    the model to green-ring as the pick for THIS metric (or None).
+    incumbent the model to mark with the purple dashed "you are here" ring.
+    ylo       the shared zoomed y-axis floor (percent) so BOTH charts use one
+              identical floor-pass-rate scale (min(80, lowest rate)..100).
+    Dots are colored by the shared `colors` map (model identity), so the same
+    model is the same color in both charts.
+    """
+    latency = (metric == "latency")
     field = "latency_s" if latency else "cost_per_test"
     axis_word = "median latency" if latency else "cost"
     pts = [(m, s) for m, s in agg.items()
            if s.get(field) is not None and s.get("floor_rate") is not None]
-    W, H = 760, 380
-    ml, mr, mt, mb = 62, 210, 24, 56
+    W, H = 430, 330
+    ml, mr, mt, mb = 56, 18, 16, 54
     pw, ph = W - ml - mr, H - mt - mb
     if not pts:
         return ('<svg width="{w}" height="80"><text x="10" y="45" '
-                'font-family="system-ui" font-size="14">No models reported a {a}; '
+                'font-family="system-ui" font-size="13">No models reported a {a}; '
                 'nothing to plot on the {a} axis.</text></svg>').format(w=W, a=axis_word)
     max_x = max(s[field] for _, s in pts) or 1e-9
     max_x *= 1.15
-    ylo = _frontier_ylo(agg)          # percent
     ylo_f = ylo / 100.0               # fraction
     span = (1.0 - ylo_f) or 1e-9
 
@@ -747,7 +795,7 @@ def _svg_frontier(agg, rec_model_id, incumbent, optimize="cost"):
         x=ml, t=mt, b=mt + ph))
     parts.append('<line x1="{x}" y1="{b}" x2="{r}" y2="{b}" stroke="#888"/>'.format(
         x=ml, b=mt + ph, r=ml + pw))
-    # y grid + labels (zoomed pass-rate ylo..100)
+    # y grid + labels (zoomed pass-rate ylo..100), shared across both charts
     for i in range(0, 5):
         pct = ylo + (100 - ylo) * i / 4.0
         y = py(pct / 100.0)
@@ -755,59 +803,70 @@ def _svg_frontier(agg, rec_model_id, incumbent, optimize="cost"):
             x=ml, y=y, r=ml + pw))
         parts.append('<text x="{x}" y="{y}" font-size="11" fill="#667" '
                      'text-anchor="end">{v:.0f}%</text>'.format(x=ml - 8, y=y + 4, v=pct))
-    # x labels (active metric: cost per test, or median latency in seconds)
+    # x labels (this chart's metric: cost per test, or median latency in seconds)
     for i in range(0, 5):
         c = max_x * i / 4.0
         x = px(c)
         lbl = "{v:.3f}s".format(v=c) if latency else "${v:.4f}".format(v=c)
-        parts.append('<text x="{x}" y="{y}" font-size="11" fill="#667" '
-                     'text-anchor="middle">{l}</text>'.format(x=x, y=mt + ph + 18, l=lbl))
-    axis_title = ("median latency per test (seconds), lower is better" if latency
+        parts.append('<text x="{x}" y="{y}" font-size="10" fill="#667" '
+                     'text-anchor="middle">{l}</text>'.format(x=x, y=mt + ph + 16, l=lbl))
+    axis_title = ("median latency per test (s), lower is better" if latency
                   else "cost per test (USD), lower is better")
-    parts.append('<text x="{x}" y="{y}" font-size="12" fill="#333" '
+    parts.append('<text x="{x}" y="{y}" font-size="11" fill="#333" '
                  'text-anchor="middle">{t}</text>'.format(
-                     x=ml + pw / 2, y=H - 10, t=html.escape(axis_title)))
-    parts.append('<text transform="translate(15,{y}) rotate(-90)" font-size="12" '
+                     x=ml + pw / 2, y=H - 8, t=html.escape(axis_title)))
+    parts.append('<text transform="translate(14,{y}) rotate(-90)" font-size="11" '
                  'fill="#333" text-anchor="middle">floor pass-rate</text>'.format(
                      y=mt + ph / 2))
-    # dots only (no inline labels -> a compact legend carries the names, so
-    # nearby dots never collide). Recommended ringed, incumbent in purple.
+    # dots colored by model identity (shared legend carries the names, so nearby
+    # dots never collide). Incumbent gets a purple dashed ring; the pick for THIS
+    # chart's metric gets a green ring. A model can carry both.
     for m, s in pts:
         x, y = px(s[field]), py(s["floor_rate"])
-        recommended = (m == rec_model_id)
-        is_inc = (incumbent and m == incumbent)
-        color = "#1a7f37" if recommended else ("#8250df" if is_inc else "#0969da")
-        if recommended:
-            parts.append('<circle cx="{x}" cy="{y}" r="11" fill="none" '
-                         'stroke="#1a7f37" stroke-width="2"/>'.format(x=x, y=y))
+        if incumbent and m == incumbent:
+            parts.append('<circle cx="{x}" cy="{y}" r="10" fill="none" '
+                         'stroke="{c}" stroke-width="2" stroke-dasharray="3 2"/>'.format(
+                             x=x, y=y, c=_INC_RING))
+        if m == ringed:
+            parts.append('<circle cx="{x}" cy="{y}" r="12" fill="none" '
+                         'stroke="{c}" stroke-width="2.5"/>'.format(x=x, y=y, c=_WIN_RING))
         parts.append('<circle cx="{x}" cy="{y}" r="6" fill="{c}" '
-                     'stroke="#fff" stroke-width="1.5"/>'.format(x=x, y=y, c=color))
-    # compact legend: colored dot + full model id + its metric and pass-rate.
-    # Vertical list in the right margin, so labels stack and never overlap.
-    lx = ml + pw + 22
-    ly = mt + 10
-    legend_rows = sorted(pts, key=optimize_sort_key(optimize))
-    for m, s in legend_rows:
-        recommended = (m == rec_model_id)
-        is_inc = (incumbent and m == incumbent)
-        color = "#1a7f37" if recommended else ("#8250df" if is_inc else "#0969da")
-        metric_txt = (fmt_latency(s["latency_s"]) if latency
-                      else fmt_cost(s["cost_per_test"]))
-        tag = " *rec" if recommended else (" *here" if is_inc else "")
-        parts.append('<circle cx="{x}" cy="{y}" r="5" fill="{c}"/>'.format(
-            x=lx, y=ly, c=color))
-        parts.append('<text x="{tx}" y="{ty}" font-size="11" fill="#222">{l}</text>'.format(
-            tx=lx + 11, ty=ly + 4, l=html.escape(m + tag)))
-        parts.append('<text x="{tx}" y="{ty}" font-size="10" fill="#889">{l}</text>'.format(
-            tx=lx + 11, ty=ly + 17,
-            l=html.escape(fmt_rate(s["floor_rate"]) + " floor, " + metric_txt)))
-        ly += 40
-    # legend key for the markers
-    parts.append('<text x="{tx}" y="{ty}" font-size="10" fill="#99a">'
-                 '*rec = recommended{inc}</text>'.format(
-                     tx=lx, ty=ly + 4,
-                     inc=", *here = you are here" if incumbent else ""))
+                     'stroke="#fff" stroke-width="1.5"/>'.format(
+                         x=x, y=y, c=colors.get(m, "#0969da")))
     parts.append("</svg>")
+    return "".join(parts)
+
+
+def _frontier_legend_html(agg, colors, rec_cost, rec_lat, incumbent):
+    """The single shared legend for BOTH frontier charts: one row per model with
+    its color swatch (same color used in both charts) and BOTH metrics, plus a
+    marker key. Rendered once, not duplicated per chart."""
+    esc = html.escape
+    rows = sorted(agg.items(),
+                  key=lambda kv: (kv[1].get("cost_per_test") is None,
+                                  kv[1].get("cost_per_test") or 0.0, kv[0]))
+    parts = ['<div class="frontier-legend"><div class="fl-models">']
+    for m, s in rows:
+        tags = []
+        if m == rec_cost:
+            tags.append("cheapest")
+        if m == rec_lat:
+            tags.append("fastest")
+        if incumbent and m == incumbent:
+            tags.append("you are here")
+        tagtxt = (' <span class="fl-tag">(' + ", ".join(tags) + ")</span>") if tags else ""
+        parts.append(
+            '<span class="legend-item"><span class="swatch" style="background:{c}">'
+            '</span><b>{m}</b>{tag} <span class="fl-metrics">{fr} floor, {cost}, {lat}'
+            '</span></span>'.format(
+                c=colors.get(m, "#0969da"), m=esc(m), tag=tagtxt,
+                fr=esc(fmt_rate(s["floor_rate"])),
+                cost=esc(fmt_cost(s["cost_per_test"])),
+                lat=esc(fmt_latency(s["latency_s"]))))
+    parts.append('</div><div class="fl-key">'
+                 '<span class="k-ring win"></span> green ring = pick for that chart'
+                 '&nbsp;&nbsp; <span class="k-ring inc"></span> purple ring = you '
+                 'are here</div></div>')
     return "".join(parts)
 
 
@@ -833,7 +892,35 @@ h2 { font-size: 1.05rem; margin: 1.8rem 0 .6rem; color: #2a3140; }
 .note { color: #8a6d00; font-size: .86rem; margin: .4rem 0; }
 .chart { background: #fff; border: 1px solid #d7dce4; border-radius: 10px;
   padding: .6rem; overflow-x: auto; }
-.chart svg { display: block; max-width: 100%; height: auto; }
+.chart svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+.chart-title { font-size: .85rem; font-weight: 600; color: #2a3140;
+  text-align: center; padding: .1rem 0 .2rem; }
+.frontier-row { display: flex; flex-wrap: wrap; gap: .7rem; }
+.frontier-row > .chart { flex: 1 1 360px; min-width: 280px; }
+.frontier-legend { background: #fff; border: 1px solid #d7dce4; border-radius: 10px;
+  padding: .6rem .8rem; margin: .2rem 0 .6rem; }
+.frontier-legend .fl-models { display: flex; flex-wrap: wrap; gap: .45rem 1.1rem; }
+.legend-item { font-size: .84rem; color: #222; display: inline-flex; align-items: center; }
+.legend-item .swatch { width: 11px; height: 11px; border-radius: 50%; display: inline-block;
+  margin-right: .35rem; box-shadow: 0 0 0 1px #ccd; }
+.legend-item .fl-metrics { color: #778; margin-left: .35rem; }
+.legend-item .fl-tag { color: #1a7f37; font-weight: 600; }
+.fl-key { font-size: .78rem; color: #889; margin-top: .55rem; }
+.fl-key .k-ring { display: inline-block; width: 12px; height: 12px; border-radius: 50%;
+  vertical-align: middle; margin-right: .2rem; }
+.fl-key .k-ring.win { border: 2px solid #1a7f37; }
+.fl-key .k-ring.inc { border: 2px dashed #8250df; }
+table.routing { border-collapse: collapse; font-size: .88rem; width: 100%; margin: .3rem 0 .6rem; }
+table.routing th { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #dde2ea;
+  color: #667; font-weight: 600; }
+table.routing td { padding: .4rem .6rem; border-bottom: 1px solid #f0f2f6; vertical-align: top; }
+table.routing td .mdl { color: #0f5a2a; font-weight: 600; }
+table.routing td .rt-metric { color: #778; font-size: .84rem; }
+table.routing td .rt-note { color: #8250df; font-size: .8rem; font-weight: 600; }
+table.routing tr.none td { color: #b35900; }
+.lens-note { color: #667; font-size: .84rem; margin: .2rem 0 .3rem; }
+.disagree-note { color: #8a6d00; font-size: .88rem; margin: .35rem 0; }
+.agree-note { color: #4a8a5a; font-size: .84rem; margin: .35rem 0; }
 table.models { border-collapse: collapse; font-size: .86rem; width: 100%; margin: .2rem 0; }
 table.models th { text-align: right; padding: .3rem .6rem; border-bottom: 1px solid #dde2ea;
   color: #667; font-weight: 600; white-space: nowrap; }
@@ -898,28 +985,32 @@ def _model_table(agg, winner, incumbent):
     return "".join(out)
 
 
-def _owner_summary_html(owner_route, everyday, labels, bar, disc_bar, optimize):
+def _owner_summary_html(lead_route, route_cost, route_lat, everyday, labels, optimize):
     """Always-visible, plain-language routing summary an owner can read.
 
-    Headline: the everyday pick (recommended for the most categories) and the
-    exceptions (categories that route elsewhere or that nothing clears). No model
-    name is hardcoded, so it reads naturally with any provider field.
+    Headline leads with the --optimize lens (`lead_route` is the routing for that
+    lens): the everyday pick (recommended for the most categories) and the
+    exceptions. Below it, a plain note surfaces every service where the CHEAPEST
+    and FASTEST picks disagree (today they usually agree, so it will usually say
+    they align). The per-category lines convey both lenses when they differ. No
+    model name is hardcoded, so it reads naturally with any provider field.
     """
     esc = html.escape
 
     def lbl(c):
         return category_label(c, labels)
 
+    lead_word = "fastest" if optimize == "latency" else "cheapest"
     parts = ['<div class="owner">']
     if everyday is None:
         parts.append('<p class="headline">No model clears the bar on any category '
                      'yet. Review the checks in each section below.</p>')
     else:
-        everyday_cats = sorted(lbl(c) for c, i in owner_route.items()
+        everyday_cats = sorted(lbl(c) for c, i in lead_route.items()
                                if i["model"] == everyday)
         other = {}
         none_cats = []
-        for c, i in owner_route.items():
+        for c, i in lead_route.items():
             if i["model"] is None:
                 none_cats.append(lbl(c))
             elif i["model"] != everyday:
@@ -937,16 +1028,46 @@ def _owner_summary_html(owner_route, everyday, labels, bar, disc_bar, optimize):
         if not other and not none_cats:
             sentences.append('It clears the bar on every categorized service.')
         parts.append('<p class="headline">' + " ".join(sentences) + "</p>")
+        parts.append('<p class="lens-note">Headline follows your <b>{lw}</b> lens. '
+                     'The two frontier charts and the per-service table below show '
+                     'both cost and latency.</p>'.format(lw=esc(lead_word)))
+
+    # Disagreement note: services where the cheapest and fastest clearer differ.
+    disagree = []
+    for c in route_cost:
+        mc = route_cost[c]["model"] if isinstance(route_cost[c], dict) else route_cost[c][0]
+        ml_ = route_lat[c]["model"] if isinstance(route_lat[c], dict) else route_lat[c][0]
+        if mc is not None and ml_ is not None and mc != ml_:
+            disagree.append((lbl(c), mc, ml_))
+    routed_any = any((route_cost[c]["model"] if isinstance(route_cost[c], dict)
+                      else route_cost[c][0]) is not None for c in route_cost)
+    if disagree:
+        frags = ["<b>{c}</b> (cheapest {a}, fastest {b})".format(
+            c=esc(cl), a=esc(mc), b=esc(ml_)) for cl, mc, ml_ in sorted(disagree)]
+        parts.append('<p class="disagree-note">Cheapest and fastest picks differ '
+                     'on: ' + "; ".join(frags) + ".</p>")
+    elif routed_any:
+        parts.append('<p class="agree-note">On every service that clears the bar, '
+                     'the cheapest and the fastest model are the same.</p>')
 
     parts.append("<ul>")
-    for c in sorted(owner_route):
-        i = owner_route[c]
+    for c in sorted(lead_route):
+        i = lead_route[c]
+        mc = route_cost[c]["model"]
+        ml_ = route_lat[c]["model"]
         if i["model"] is None:
             parts.append(
                 '<li class="none"><span class="cat">{cat}</span> '
                 '<span class="arrow">-></span> <span class="mdl">no model clears '
                 'it yet</span> <span class="why">({why})</span></li>'.format(
                     cat=esc(lbl(c)), why=esc(i["reason"])))
+        elif mc is not None and ml_ is not None and mc != ml_:
+            parts.append(
+                '<li><span class="cat">{cat}</span> <span class="arrow">-></span> '
+                'cheapest <span class="mdl">{cm}</span>, fastest '
+                '<span class="mdl">{fm}</span> '
+                '<span class="why">(the two lenses disagree here)</span></li>'.format(
+                    cat=esc(lbl(c)), cm=esc(mc), fm=esc(ml_)))
         else:
             parts.append(
                 '<li><span class="cat">{cat}</span> <span class="arrow">-></span> '
@@ -957,12 +1078,56 @@ def _owner_summary_html(owner_route, everyday, labels, bar, disc_bar, optimize):
     return "".join(parts)
 
 
+def _dual_routing_html(cat_aggs, bar, disc_bar, labels):
+    """Per-service dual routing table: for each category the CHEAPEST model that
+    clears the bar (with its cost/test) and the FASTEST (with its median
+    latency). When the two picks are the SAME model the cell collapses across
+    both columns and notes "cheapest and fastest". When no model clears, the row
+    says so and names the closest (strongest) model."""
+    esc = html.escape
+    dr = dual_routing(cat_aggs, bar, disc_bar)
+    parts = ['<h2>Per-service routing</h2>',
+             '<table class="routing"><thead><tr>'
+             '<th class="l">service</th><th class="l">cheapest</th>'
+             '<th class="l">fastest</th></tr></thead><tbody>']
+    for c in sorted(dr):
+        lbl = category_label(c, labels)
+        cheap_m, cheap_cost, _cl = dr[c]["cheapest"]
+        fast_m, _fc, fast_lat = dr[c]["fastest"]
+        if cheap_m is None:
+            strong = strongest_model(cat_aggs[c])
+            parts.append(
+                '<tr class="none"><td class="l"><b>{cat}</b></td>'
+                '<td class="l" colspan="2">no model clears the bar yet '
+                '({strong} is closest)</td></tr>'.format(
+                    cat=esc(lbl), strong=esc(str(strong))))
+        elif cheap_m == fast_m:
+            parts.append(
+                '<tr><td class="l"><b>{cat}</b></td>'
+                '<td class="l" colspan="2"><span class="mdl">{m}</span> '
+                '<span class="rt-note">cheapest and fastest</span> '
+                '<span class="rt-metric">{cost}, {lat}</span></td></tr>'.format(
+                    cat=esc(lbl), m=esc(cheap_m),
+                    cost=esc(fmt_cost(cheap_cost)), lat=esc(fmt_latency(fast_lat))))
+        else:
+            parts.append(
+                '<tr><td class="l"><b>{cat}</b></td>'
+                '<td class="l"><span class="mdl">{cm}</span> '
+                '<span class="rt-metric">{cost}</span></td>'
+                '<td class="l"><span class="mdl">{fm}</span> '
+                '<span class="rt-metric">{lat}</span></td></tr>'.format(
+                    cat=esc(lbl), cm=esc(cheap_m), cost=esc(fmt_cost(cheap_cost)),
+                    fm=esc(fast_m), lat=esc(fmt_latency(fast_lat))))
+    parts.append('</tbody></table>')
+    return "".join(parts)
+
+
 def _drilldown_html(owner_route, cat_aggs, cat_fails, labels, incumbent):
     """Per-category <details>, closed by default. Summary = the owner line;
     expansion = the per-model table for that category plus the DEDUPED floor
     failures within it."""
     esc = html.escape
-    parts = ['<h2>Per-category routing</h2>']
+    parts = ['<h2>Per-category detail</h2>']
     for c in sorted(cat_aggs):
         i = owner_route.get(c, {"model": None, "reason": "", "strongest": None})
         lbl = category_label(c, labels)
@@ -1035,14 +1200,19 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
     esc = html.escape
     labels = labels or {}
     cat_aggs = cat_aggs if cat_aggs is not None else {}
-    owner_route = owner_routing(cat_aggs, bar, disc_bar, optimize)
-    everyday = everyday_pick(owner_route, optimize, agg)
+    # Both routing lenses are always computed. The headline leads with --optimize;
+    # the frontier charts and the per-service table always show both.
+    route_cost = owner_routing(cat_aggs, bar, disc_bar, "cost")
+    route_lat = owner_routing(cat_aggs, bar, disc_bar, "latency")
+    lead_route = route_lat if optimize == "latency" else route_cost
+    everyday = everyday_pick(lead_route, optimize, agg)
     note = ("" if layered else
             '<p class="note">Tests were not tagged by layer, so floor = overall '
             'pass-rate and disc = mean score across all tests.</p>')
 
-    if categorized and owner_route:
-        owner = _owner_summary_html(owner_route, everyday, labels, bar, disc_bar, optimize)
+    if categorized and lead_route:
+        owner = _owner_summary_html(lead_route, route_cost, route_lat, everyday,
+                                    labels, optimize)
     else:
         pick = ("fastest by median latency" if optimize == "latency" else "cheapest")
         line = ("Run <b>{}</b>, the {} model that clears the bar.".format(
@@ -1054,16 +1224,33 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
                  'per-category routing is absent. Tag tests with metadata.category '
                  'to enable it.</p></div>')
 
-    frontier = _svg_frontier(agg, rec_model_id, incumbent, optimize)
-    overall_table = _model_table(agg, rec_model_id, incumbent)
+    # Two frontier charts, always: overall cheapest and overall fastest clearer
+    # are ringed in their respective charts; both share the model color map and
+    # the same zoomed y-axis floor. One shared legend serves both.
+    colors = _model_colors(agg)
+    ylo = _frontier_ylo(agg)
+    rec_cost = recommend(agg, bar, disc_bar, "cost")
+    rec_lat = recommend(agg, bar, disc_bar, "latency")
+    legend = _frontier_legend_html(agg, colors, rec_cost, rec_lat, incumbent)
+    svg_cost = _svg_frontier_plot(agg, colors, "cost", rec_cost, incumbent, ylo)
+    svg_lat = _svg_frontier_plot(agg, colors, "latency", rec_lat, incumbent, ylo)
+    frontiers = (legend
+                 + '<div class="frontier-row">'
+                 + '<div class="chart"><div class="chart-title">cost vs quality'
+                   '</div>' + svg_cost + '</div>'
+                 + '<div class="chart"><div class="chart-title">latency vs quality'
+                   '</div>' + svg_lat + '</div>'
+                 + '</div>')
+
+    overall_table = _model_table(agg, rec_cost, incumbent)
     if categorized and cat_aggs:
+        dual_table = _dual_routing_html(cat_aggs, bar, disc_bar, labels)
         cat_fails = category_floor_failures(records or [])
-        drilldown = _drilldown_html(owner_route, cat_aggs, cat_fails, labels, incumbent)
+        drilldown = _drilldown_html(lead_route, cat_aggs, cat_fails, labels, incumbent)
     else:
+        dual_table = ""
         drilldown = ""
     health = _suite_health_html(tests if tests is not None else {}, layered)
-    frontier_title = ("Latency vs quality" if optimize == "latency"
-                      else "Cost vs quality")
     db = ("" if disc_bar <= 0
           else ", disc score at or above {:.2f}".format(disc_bar))
 
@@ -1080,8 +1267,9 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
 <h1>Which model to run</h1>
 {owner}
 {note}
-<h2>{frontier_title}</h2>
-<div class="chart">{frontier}</div>
+<h2>Cost and latency vs quality</h2>
+{frontiers}
+{dual_table}
 <h2>All models at a glance</h2>
 <p style="font-size:.83rem;color:#4a5568;background:#f3f5f8;border:1px solid #e2e6ec;border-radius:6px;padding:.55rem .75rem;margin:.4rem 0 .9rem;line-height:1.55"><b>floor</b>: must-pass correctness and guardrails, the routing gate (you want 100%). &nbsp; <b>disc</b>: discriminating, the graded hard-reasoning score, 0 to 1, used to rank models. &nbsp; <b>latency</b>: median response time. &nbsp; <b>cost/test</b>: average API cost per test.</p>
 {overall_table}
@@ -1091,8 +1279,8 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
 </div>
 <script>function cwAll(o){{document.querySelectorAll('details').forEach(function(d){{d.open=o;}});}}</script>
 </body></html>""".format(
-        css=_REPORT_CSS, owner=owner, note=note, frontier=frontier,
-        frontier_title=frontier_title, overall_table=overall_table,
+        css=_REPORT_CSS, owner=owner, note=note, frontiers=frontiers,
+        dual_table=dual_table, overall_table=overall_table,
         drilldown=drilldown, health=health, barp=bar * 100, db=db)
 
 
@@ -1218,22 +1406,60 @@ def _selftest():
     # the zoomed y-axis lower bound never starts above 80.
     assert _frontier_ylo(agg) <= 80, _frontier_ylo(agg)
 
-    # HTML report must carry both the suite-health and the routing block.
+    # --- dual routing: cheapest and fastest computed once per metric. The set
+    # of clearers is metric-independent, so where more than one model clears the
+    # two lenses can name DIFFERENT models. Frontend is the divergence case. ---
+    dr = dual_routing(cat_aggs, 1.0, 0.0)
+    assert dr["frontend"]["cheapest"][0] == "anthropic:haiku", dr["frontend"]
+    assert dr["frontend"]["fastest"][0] == "anthropic:opus", dr["frontend"]
+    # cheapest column carries haiku's per-test cost; fastest carries opus's latency.
+    assert dr["frontend"]["cheapest"][1] == 0.002, dr["frontend"]
+    assert dr["frontend"]["fastest"][2] == 0.5, dr["frontend"]
+    # math: only opus clears, so cheapest and fastest agree (collapse case).
+    assert dr["math"]["cheapest"][0] == "anthropic:opus", dr["math"]
+    assert dr["math"]["fastest"][0] == "anthropic:opus", dr["math"]
+    # theory: nobody clears a floor bar, so neither lens routes a model.
+    assert dr["theory"]["cheapest"][0] is None, dr["theory"]
+    assert dr["theory"]["fastest"][0] is None, dr["theory"]
+
+    # HTML report must carry the suite-health block, the dual routing table, and
+    # BOTH frontier charts under one shared legend.
     doc = render_html(agg, layered, 1.0, 0.0, rec, "anthropic:opus", tests,
                       cat_aggs, categorized, records=records)
     assert "Suite health" in doc, "suite-health block missing from HTML"
     assert "diagnose devig longshot bias" in doc, "saturated test missing from HTML"
-    assert "Per-category routing" in doc, "routing block missing from HTML"
+    assert "Per-service routing" in doc, "dual routing table missing from HTML"
+    assert "Per-category detail" in doc, "per-category drilldown missing from HTML"
+    # two frontier charts: one cost-x, one latency-x, both axis titles present.
+    assert "cost vs quality" in doc, "cost frontier title missing from HTML"
+    assert "latency vs quality" in doc, "latency frontier title missing from HTML"
+    assert "cost per test (USD)" in doc, "cost x-axis label missing from HTML"
+    assert "median latency per test (s)" in doc, "latency x-axis label missing from HTML"
+    # exactly ONE shared model legend serves both charts.
+    assert doc.count('class="frontier-legend"') == 1, "legend must be shared, not per-chart"
+    # dual routing table: a cheapest and a fastest column header.
+    assert ">cheapest<" in doc and ">fastest<" in doc, "dual routing columns missing"
+    # frontend diverges: the disagreement note must fire and name both picks.
+    assert "Cheapest and fastest picks differ" in doc, "disagreement note missing"
+    assert "the two lenses disagree here" in doc, "per-category disagreement line missing"
+    # math collapses to one model that is both cheapest and fastest.
+    assert "cheapest and fastest" in doc, "collapsed same-model routing cell missing"
+    # KEEP: legend paragraph, all-models table, incumbent marker, collapse-all.
+    assert "you are here" in doc, "incumbent marker missing from HTML"
     assert "NO MODEL CLEARS THE BAR" in doc, "no-clear marking missing from HTML"
-    assert "Cost vs quality" in doc, "cost-mode frontier title missing from HTML"
     assert "for everyday work" in doc, "owner headline missing from HTML"
     assert "Expand all" in doc and "Collapse all" in doc, "collapse-all control missing"
     assert "<details class=\"cat\"" in doc, "collapsible category detail missing"
-    # latency-mode HTML must relabel the frontier and show the latency metric.
+    assert "Headline follows your <b>cheapest</b> lens" in doc, "cost-lens headline note missing"
+
+    # --optimize only flips which lens the HEADLINE leads with; both frontiers
+    # and both routing picks always show, so the two docs share the same charts.
     doc_lat = render_html(agg, layered, 1.0, 0.0, rec_lat, "anthropic:opus", tests,
                           cat_aggs, categorized, optimize="latency", records=records)
-    assert "Latency vs quality" in doc_lat, "latency-mode frontier title missing"
-    assert "median latency" in doc_lat, "latency axis label missing from HTML"
+    assert "cost vs quality" in doc_lat and "latency vs quality" in doc_lat, \
+        "both frontiers must render regardless of --optimize"
+    assert "Per-service routing" in doc_lat, "dual routing must render in latency mode"
+    assert "Headline follows your <b>fastest</b> lens" in doc_lat, "latency-lens headline note missing"
     print("\nselftest: OK")
 
 
@@ -1248,11 +1474,13 @@ def main():
     ap.add_argument("--disc-bar", type=float, default=0.0,
                     help="optional minimum discriminating score (default 0, off)")
     ap.add_argument("--optimize", choices=("cost", "latency"), default="cost",
-                    help="among models that clear the bar, pick the CHEAPEST "
-                         "(cost, default) or the FASTEST by median latency "
-                         "(latency). Latency suits a flat-rate user who pays no "
-                         "per-token cost and just wants the quickest model that "
-                         "reliably clears the bar. The bar itself is unchanged.")
+                    help="which lens the owner HEADLINE leads with: cost (default, "
+                         "cheapest that clears the bar) or latency (fastest by "
+                         "median latency that clears the bar). This ONLY sets the "
+                         "headline emphasis. The HTML report always shows BOTH "
+                         "frontier charts (cost-x and latency-x) and BOTH routing "
+                         "picks (cheapest and fastest) per service, whatever you "
+                         "choose. The bar itself is unchanged.")
     ap.add_argument("--incumbent", default=None,
                     help="provider:model you run today, marked 'you are here'")
     ap.add_argument("--out", default="report.html", help="HTML report path")
