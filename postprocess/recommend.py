@@ -1083,6 +1083,7 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
 <h2>{frontier_title}</h2>
 <div class="chart">{frontier}</div>
 <h2>All models at a glance</h2>
+<p style="font-size:.83rem;color:#4a5568;background:#f3f5f8;border:1px solid #e2e6ec;border-radius:6px;padding:.55rem .75rem;margin:.4rem 0 .9rem;line-height:1.55"><b>floor</b>: must-pass correctness and guardrails, the routing gate (you want 100%). &nbsp; <b>disc</b>: discriminating, the graded hard-reasoning score, 0 to 1, used to rank models. &nbsp; <b>latency</b>: median response time. &nbsp; <b>cost/test</b>: average API cost per test.</p>
 {overall_table}
 {drilldown}
 {health}
