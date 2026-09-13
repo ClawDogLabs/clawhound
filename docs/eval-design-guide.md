@@ -19,6 +19,13 @@ A suite is not one flat list. Tag every test `metadata.layer`:
   Graded with `g-eval`. Discriminating answers "which model is actually better,"
   and comes from the client's hardest real tasks, not the docs.
 
+Discrimination erodes. A suite mined mostly from scaffolding or one-shot tasks
+loses ranking power as models improve: cases that once spread models apart
+saturate to all-pass. Re-check the discriminating layer for SPREAD periodically,
+not just the floor for correctness. `recommend.py`'s `suite_health` flags
+discriminating tests every model aces; harden or retire those (make them harder,
+or move them to floor) so the layer keeps ranking.
+
 `postprocess/recommend.py` reads these tags: floor pass-rate is the gate,
 discriminating score ranks and can be a second gate.
 
@@ -117,6 +124,54 @@ two shapes above. Copy `blackwire` as the model to follow: it GIVES the axiom in
 prompt (the deflate / inflate odds convention, the draw-is-a-push rule, the fee-context
 split) and tests whether the model APPLIES it, rather than asking it to recall a value
 it was never given.
+
+## Wrong-proxy tests (score the choice of measurement, not the arithmetic)
+
+The most expensive real-world errors are not knowledge gaps and not hallucinations.
+The model invents nothing; it measures the wrong true thing, and returns a
+confident, internally consistent, WRONG number. From one real rigging session:
+
+- Goal "keep the toe on the floor" solved as "keep the lowest toe VERTEX at floor
+  height" (factor 1.6, visibly wrong); the correct criterion was "keep the toe's
+  world PITCH unchanged" (exactly 1.00).
+- Checked whether a constraint fired by reading `matrix_basis`, which is the
+  PRE-constraint transform and reads the same either way.
+- Compared a mean across frames where the underlying vertex set differed.
+- A percentage came out at 153% because the denominator excluded antialiased edges.
+
+Every one PASSES a naive assertion that only checks "did the model report a
+measurement." That is why they need their own shape. Give the model a goal and a
+system and ask what it would MEASURE to verify the goal is met; grade the
+CHOICE of proxy (does this measurable actually track the goal, in this system?),
+not the arithmetic on it. Use `g-eval` with a rubric that names the correct
+measurable and rewards catching the trap, so a careful model outscores a
+plausible-but-wrong one. These are discriminating cases, and fully text-in,
+text-out. Distinguish them from hallucination tests: nothing is fabricated here,
+so a "did it invent a fact" check will not catch them.
+
+Good source material attaches the assertion to a measurement and a number, not a
+rubric on prose: a documented silent failure, the measurement that caught it, and
+the value. A gotchas/post-incident doc in that shape mines almost directly into
+wrong-proxy cases.
+
+## What clawhound does NOT measure (scope boundaries, state them to the client)
+
+Name these as deliberate non-goals so nobody mistakes silence for coverage:
+
+- **Single request/response, not the agentic loop.** clawhound scores one
+  prompt and one answer. A model that wins nearly every individual item but needs
+  five corrections per task is worse in practice, and this does not see that.
+  Correction-count and autonomy are out of scope for the MVP, on purpose.
+- **Text in, text out.** A harness where the agent renders an image, looks at its
+  own render, and self-corrects is a loop with a non-text modality in it. If a
+  model's production value comes mostly from such a loop, the suite under-credits
+  it; say so rather than implying the score is the whole picture.
+- **Cost is COLD, per-call cost.** promptfoo records cached vs fresh tokens
+  (`tokenUsage.cached`, `completionDetails.cacheReadInputTokens` /
+  `cacheCreationInputTokens`), but clawhound's independent single-shot tests carry
+  effectively no cache, so the measured cost is the uncached worst case. A
+  production harness with heavy prompt caching pays a fraction of it. Read the cost
+  view as a relative ranking under no-cache, not a production bill.
 
 ## Rule to assertion
 

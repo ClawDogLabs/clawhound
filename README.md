@@ -67,8 +67,14 @@ Ollama (`http://localhost:11434/v1`), vLLM, LM Studio, or hosted APIs like
 Kimi/Moonshot, Together, and OpenRouter. See the commented block in
 `templates/promptfooconfig.yaml`.
 
-clawhound tests text in, text out. Image-generation endpoints (ComfyUI and the
-like) are a different modality and out of scope.
+clawhound tests text in, text out, and scores one request against one response.
+Deliberately out of scope: multi-turn autonomy and corrections-per-task (a model
+that wins each item but needs five corrections per task is worse in practice, and
+this does not measure that), and loops with a non-text modality in them
+(render-look-and-fix visual self-correction, image-generation endpoints like
+ComfyUI). Reported cost is cold per-call cost, not a production bill: independent
+single-shot tests carry no prompt cache, so a heavily-cached production harness
+pays far less.
 
 ## Layout
 

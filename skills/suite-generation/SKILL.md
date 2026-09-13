@@ -136,6 +136,18 @@ HARDEST reasoning, the tasks that separate a strong model from a weak one. Use
 weaker model visibly scores lower rather than flatly failing. These are what let
 the matrix rank models; a suite of only floor cases saturates and ranks nothing.
 
+Mine **wrong-proxy cases** here specifically, they are high-value discriminators.
+A gotchas / post-incident doc often records a failure where the model measured the
+WRONG true thing and returned a confident, consistent, wrong number (kept the
+lowest vertex on the floor instead of the toe's world pitch; read a pre-constraint
+transform to check a post-constraint effect; a denominator that silently excluded
+some inputs). Turn each into a case that gives the goal and the system and asks
+what to MEASURE to verify it, then grade the CHOICE of proxy with `g-eval`, not the
+arithmetic. A naive "did it report a number" assertion passes all of these, which
+is exactly why they discriminate. See the eval-design guide's "Wrong-proxy tests"
+section. Docs that pair a silent failure with the measurement that caught it and a
+number mine almost directly into these.
+
 ## promptfoo assertion gotchas (do this, learned from real runs)
 
 - **Quote every `g-eval` and `llm-rubric` criterion.** A `": "` inside an unquoted
