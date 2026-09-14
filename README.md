@@ -21,6 +21,15 @@ promptfoo leaves to you:
    you which model to run, whether it clears your bar, and what it costs, with a
    cost-vs-quality chart a non-technical owner gets at a glance.
 
+## What you get
+
+![clawhound decision report: twin cost- and latency-vs-quality frontiers with a sortable all-models table](docs/assets/example-report.png)
+
+The decision report: both frontier charts (cost and latency vs floor pass-rate),
+models colored by vendor with the free / local tier collapsed into a gray group,
+and a sortable all-models table (floor, disc, latency, cost). Hover any model to
+highlight it across both charts and the table.
+
 ## Two layers of tests
 
 - **Floor** (deterministic, must pass): correctness and guardrails, mined from
