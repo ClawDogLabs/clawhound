@@ -1402,9 +1402,12 @@ def _run_cost_html(records, judge_id=None):
                    tc=("~" + D(total_cost) if grade_cost is not None else D(tot["cost"]))))
     out.append('</tbody></table>')
     out.append('<p class="runcost-note">Generation cost is promptfoo\'s own '
-               'per-model figure. Grading cost is estimated from the judge\'s grading '
-               'tokens at its list price (promptfoo does not price grading). Local '
-               'models are free.</p>')
+               'per-model figure. Grading cost is a LIST-PRICE UPPER BOUND: the '
+               'judge\'s grading tokens at its list rate, with no caching or volume '
+               'discounts, and promptfoo does not meter grading itself. Actual billed '
+               'cost is usually lower, and provider usage dashboards lag (Anthropic '
+               'more than most), so confirm real spend in each provider\'s usage '
+               'console. Local models are free.</p>')
     return "".join(out)
 
 
