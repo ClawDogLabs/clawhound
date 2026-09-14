@@ -588,17 +588,17 @@ def fmt_score(x):
 
 def fmt_cost(x):
     # Per-test cost is fractions of a cent and unreadable at 5-6 decimals, so we
-    # display it per 1,000 tests, a readable dollar figure. Self-describing ("/1k")
+    # display it per 100 tests, a readable dollar figure. Self-describing ("/100")
     # because it is also used inline where there is no column header. Absolute run
     # totals (the run-cost panel) use their own dollar formatter, not this one.
     if x is None:
         return "n/a"
     if x == 0:
         return "$0 (free)"
-    per_k = x * 1000.0
-    if per_k < 0.01:
-        return "<$0.01/1k"
-    return "${:,.2f}/1k".format(per_k)
+    per_c = x * 100.0
+    if per_c < 0.01:
+        return "<$0.01/100"
+    return "${:,.2f}/100".format(per_c)
 
 
 def fmt_latency(x):
@@ -614,7 +614,7 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
     name_w = max([len("model")] + [len(m) for m in agg]) + 2
     # Always show cost/test when known; the active metric gets its own column.
     header = "{:<{w}} {:>10} {:>8} {:>14} {:>14}".format(
-        "model", "floor", "disc", "cost/1k", "latency", w=name_w)
+        "model", "floor", "disc", "cost/100", "latency", w=name_w)
     print(header)
     print("-" * len(header))
     for m, s in rows:
@@ -692,7 +692,7 @@ def print_routing(cat_aggs, categorized, bar, disc_bar, optimize="cost"):
     mdl_w = max([len("model")]
                 + [len(t[0]) for t in routing.values() if t[0]]) + 2
     header = "{:<{cw}} {:<{mw}} {:>14} {:>14}".format(
-        "category", "model", "cost/1k", "latency", cw=cat_w, mw=mdl_w)
+        "category", "model", "cost/100", "latency", cw=cat_w, mw=mdl_w)
     print(header)
     print("-" * len(header))
     for c in cats:
@@ -878,11 +878,11 @@ def _svg_frontier_plot(agg, colors, metric, ringed, incumbent, ylo, top_n=None):
     for i in range(0, 5):
         c = max_x * i / 4.0
         x = px(c)
-        lbl = "{v:.3f}s".format(v=c) if latency else "${v:,.2f}".format(v=c * 1000)
+        lbl = "{v:.3f}s".format(v=c) if latency else "${v:,.2f}".format(v=c * 100)
         parts.append('<text x="{x}" y="{y}" font-size="10" fill="#667" '
                      'text-anchor="middle">{l}</text>'.format(x=x, y=mt + ph + 16, l=lbl))
     axis_title = ("median latency per test (s), lower is better" if latency
-                  else "cost per 1,000 tests (USD), lower is better")
+                  else "cost per 100 tests (USD), lower is better")
     parts.append('<text x="{x}" y="{y}" font-size="11" fill="#333" '
                  'text-anchor="middle">{t}</text>'.format(
                      x=ml + pw / 2, y=H - 8, t=html.escape(axis_title)))
@@ -1155,7 +1155,7 @@ def _model_table(agg, winner, incumbent):
            '<th class="sortable" data-col="1" data-better="hi">floor</th>'
            '<th class="sortable" data-col="2" data-better="hi">disc</th>'
            '<th class="sortable" data-col="3" data-better="lo">latency</th>'
-           '<th class="sortable" data-col="4" data-better="lo">cost /1k</th>'
+           '<th class="sortable" data-col="4" data-better="lo">cost /100</th>'
            '<th class="l"></th>'
            '</tr></thead><tbody>']
     for m, s in rows:
@@ -1603,7 +1603,7 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
 <h2>Cost and latency vs quality</h2>
 {frontiers}
 <h2>All models at a glance</h2>
-<p style="font-size:.83rem;color:#4a5568;background:#f3f5f8;border:1px solid #e2e6ec;border-radius:6px;padding:.55rem .75rem;margin:.4rem 0 .9rem;line-height:1.55"><b>floor</b>: must-pass correctness and guardrails, the routing gate (you want 100%). &nbsp; <b>disc</b>: discriminating, the graded hard-reasoning score, 0 to 1, used to rank models. &nbsp; <b>latency</b>: median response time. &nbsp; <b>cost /1k</b>: average API cost per 1,000 tests (per-test is fractions of a cent; the run-cost panel below shows real totals).</p>
+<p style="font-size:.83rem;color:#4a5568;background:#f3f5f8;border:1px solid #e2e6ec;border-radius:6px;padding:.55rem .75rem;margin:.4rem 0 .9rem;line-height:1.55"><b>floor</b>: must-pass correctness and guardrails, the routing gate (you want 100%). &nbsp; <b>disc</b>: discriminating, the graded hard-reasoning score, 0 to 1, used to rank models. &nbsp; <b>latency</b>: median response time. &nbsp; <b>cost /100</b>: average API cost per 100 tests (per-test is fractions of a cent; the run-cost panel below shows real totals).</p>
 {overall_table}
 {dual_table}
 {drilldown}
@@ -1768,7 +1768,7 @@ def _selftest():
     # two frontier charts: one cost-x, one latency-x, both axis titles present.
     assert "cost vs quality" in doc, "cost frontier title missing from HTML"
     assert "latency vs quality" in doc, "latency frontier title missing from HTML"
-    assert "cost per 1,000 tests (USD)" in doc, "cost x-axis label missing from HTML"
+    assert "cost per 100 tests (USD)" in doc, "cost x-axis label missing from HTML"
     assert "median latency per test (s)" in doc, "latency x-axis label missing from HTML"
     # exactly ONE shared model legend serves both charts.
     assert doc.count('class="frontier-legend"') == 1, "legend must be shared, not per-chart"
