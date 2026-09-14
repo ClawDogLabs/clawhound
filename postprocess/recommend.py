@@ -621,15 +621,20 @@ def fmt_model_name(provider_id):
     openai:gpt-5-mini -> GPT-5 Mini
     google:gemini-3.1-pro-preview -> Gemini 3.1 Pro Preview
     ollama:chat:llama3.1 -> Llama 3.1
+    ollama:chat:deepseek-r1:14b -> Deepseek R1 14b
     """
     if not provider_id:
         return provider_id
     parts = provider_id.split(":")
-    model_part = parts[-1] if parts else provider_id
-    if model_part in ("messages", "chat"):
-        model_part = parts[-2] if len(parts) >= 2 else provider_id
-    # Replace underscores with spaces (always word separators)
-    name = model_part.replace("_", " ")
+    # For ollama models like "ollama:chat:model:size", take everything after "chat"
+    if parts and parts[0] == "ollama" and len(parts) > 2 and parts[1] == "chat":
+        model_part = ":".join(parts[2:])  # Join everything after "chat"
+    else:
+        model_part = parts[-1] if parts else provider_id
+        if model_part in ("messages", "chat"):
+            model_part = parts[-2] if len(parts) >= 2 else provider_id
+    # Replace underscores and colons with spaces (word separators)
+    name = model_part.replace("_", " ").replace(":", " ")
     # Replace hyphens with spaces ONLY between letters (e.g., "pro-preview" -> "pro preview")
     # Keep hyphens that are part of version numbers (e.g., "3.1" or "4-5" stay as-is)
     import re
@@ -1014,21 +1019,7 @@ def _frontier_legend_html(agg, colors, rec_cost, rec_lat, incumbent, top_n=None)
             'style="background:{c}"></span><b>{k} models</b> '
             '<span class="fl-tag" style="color:#889">({names})</span></span>'.format(
                 k=esc(gkey), c=_GROUP_GRAY, names=esc(names)))
-    # Only advertise a ring when it is actually drawn: the green (pick) ring only
-    # exists when some model clears the bar, and the purple (incumbent) ring only
-    # when an incumbent was passed. Mentioning an absent ring reads as a bug.
-    hint = ('hover or click a model to highlight it in both charts '
-            '(metrics are in the table below)')
-    key_bits = []
-    if rec_cost or rec_lat:
-        key_bits.append('<span class="k-ring win"></span> green ring = pick for that chart')
-    if incumbent:
-        key_bits.append('<span class="k-ring inc"></span> purple dashed ring = you are here')
-    if key_bits:
-        keyhtml = '&nbsp;&nbsp; '.join(key_bits) + '&nbsp;&nbsp; ' + hint
-    else:
-        keyhtml = 'no model cleared the bar, so no pick is ringed. ' + hint
-    parts.append('</div><div class="fl-key">' + keyhtml + '</div></div>')
+    parts.append('</div></div>')
     return "".join(parts)
 
 
