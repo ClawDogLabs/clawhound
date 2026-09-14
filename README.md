@@ -1,8 +1,9 @@
 # clawhound
 
-clawhound tells you which model and thinking level to run for the tasks you rely
-on, and whether to switch when a new one ships. It answers from your own work,
-not vibes and not a generic leaderboard.
+clawhound tells you which model to run for the tasks you rely on, and whether to
+switch when a new one ships. It answers from your own work, not vibes and not a
+generic leaderboard. Once you've narrowed to a model, you can extend the suite to
+compare thinking levels on that model.
 
 It is a thin layer on top of [promptfoo](https://www.promptfoo.dev), the standard
 open-source eval runner. promptfoo runs your tests across every provider (OpenAI,

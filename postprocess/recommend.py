@@ -614,10 +614,51 @@ def fmt_latency(x):
     return "{:.3f}".format(x).rstrip("0").rstrip(".") + "s"
 
 
+def fmt_model_name(provider_id):
+    """Convert a full provider ID to a human-readable model name.
+
+    anthropic:messages:claude-opus-5 -> Claude Opus 5
+    openai:gpt-5-mini -> GPT-5 Mini
+    google:gemini-3.1-pro-preview -> Gemini 3.1 Pro Preview
+    ollama:chat:llama3.1 -> Llama 3.1
+    """
+    if not provider_id:
+        return provider_id
+    parts = provider_id.split(":")
+    model_part = parts[-1] if parts else provider_id
+    if model_part in ("messages", "chat"):
+        model_part = parts[-2] if len(parts) >= 2 else provider_id
+    # Replace underscores with spaces (always word separators)
+    name = model_part.replace("_", " ")
+    # Replace hyphens with spaces ONLY between letters (e.g., "pro-preview" -> "pro preview")
+    # Keep hyphens that are part of version numbers (e.g., "3.1" or "4-5" stay as-is)
+    import re
+    name = re.sub(r'-([a-z])', r' \1', name)  # Insert space before lowercase after hyphen
+    name = re.sub(r'([a-z])-', r'\1 ', name)  # Insert space after letters before hyphen
+    # Add spaces between letters and numbers where needed (e.g., "llama3.1" -> "llama 3.1")
+    name = re.sub(r'([a-z])(\d)', r'\1 \2', name)
+    name = re.sub(r'(\d)([a-z])', r'\1 \2', name)
+    words = name.split()
+    formatted = []
+    acronyms = {"gpt": "GPT", "llm": "LLM"}
+    for w in words:
+        # Preserve all-caps acronyms like "GPT", treat version numbers as-is
+        if w.isupper() and len(w) <= 3:
+            formatted.append(w)
+        elif w[0].isdigit():
+            formatted.append(w)
+        elif w.lower() in acronyms:
+            formatted.append(acronyms[w.lower()])
+        else:
+            formatted.append(w[0].upper() + w[1:] if w else w)
+    return " ".join(formatted)
+
+
 def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize="cost"):
     field = _metric_field(optimize)
     rows = sorted(agg.items(), key=optimize_sort_key(optimize))
-    name_w = max([len("model")] + [len(m) for m in agg]) + 2
+    display_names = {m: fmt_model_name(m) for m, _ in rows}
+    name_w = max([len("model")] + [len(display_names[m]) for m, _ in rows]) + 2
     # Always show cost/test when known; the active metric gets its own column.
     header = "{:<{w}} {:>10} {:>8} {:>14} {:>14}".format(
         "model", "floor", "disc", "cost/100", "latency", w=name_w)
@@ -631,7 +672,7 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
         elif incumbent and m == incumbent:
             mark = "  (you are here)"
         print("{:<{w}} {:>10} {:>8} {:>14} {:>14}{}".format(
-            m, fmt_rate(s["floor_rate"]), fmt_score(s["disc"]),
+            display_names[m], fmt_rate(s["floor_rate"]), fmt_score(s["disc"]),
             fmt_cost(cpt), fmt_latency(s["latency_s"]), mark, w=name_w))
     print()
     if not layered:
@@ -640,8 +681,9 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
     metric_word = "fastest by median latency" if optimize == "latency" else "lowest cost"
     if rec_model_id:
         s = agg[rec_model_id]
+        rec_display = display_names.get(rec_model_id, fmt_model_name(rec_model_id))
         print("Run: {}. Clears the bar (floor {} >= {:.0f}%){} at the {}."
-              .format(rec_model_id, fmt_rate(s["floor_rate"]), bar * 100,
+              .format(rec_display, fmt_rate(s["floor_rate"]), bar * 100,
                       "" if disc_bar <= 0 else ", disc {} >= {:.2f}".format(
                           fmt_score(s["disc"]), disc_bar),
                       metric_word))
@@ -657,8 +699,10 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
             save = (1 - rec / inc) * 100
             better = "faster" if optimize == "latency" else "cheaper"
             unit = "per test" if optimize == "cost" else "in median latency"
+            inc_display = display_names.get(incumbent, fmt_model_name(incumbent))
+            rec_display = display_names.get(rec_model_id, fmt_model_name(rec_model_id))
             print("Versus your current {}: about {:.0f}% {} {} at or above your bar."
-                  .format(incumbent, save, better, unit))
+                  .format(inc_display, save, better, unit))
 
 
 def print_health(tests, layered):
@@ -677,7 +721,7 @@ def print_health(tests, layered):
         return
     for m, test, fails, runs in regressions:
         print('FLOOR FAIL: model {} fails "{}" ({}/{} runs): regression or '
-              'coverage gap.'.format(m, test, fails, runs))
+              'coverage gap.'.format(fmt_model_name(m), test, fails, runs))
     for test in saturated:
         print('SATURATED: discriminating test "{}" - all models passed, so it '
               'gives no ranking signal. Harden or retire it.'.format(test))
@@ -695,8 +739,9 @@ def print_routing(cat_aggs, categorized, bar, disc_bar, optimize="cost"):
     routing = route_by_category(cat_aggs, bar, disc_bar, optimize)
     cats = sorted(routing)
     cat_w = max([len("category")] + [len(c) for c in cats]) + 2
+    model_display = {m: fmt_model_name(m) for m, _, _ in routing.values() if m}
     mdl_w = max([len("model")]
-                + [len(t[0]) for t in routing.values() if t[0]]) + 2
+                + [len(model_display.get(m, "NO MODEL CLEARS THE BAR")) for m, _, _ in routing.values()]) + 2
     header = "{:<{cw}} {:<{mw}} {:>14} {:>14}".format(
         "category", "model", "cost/100", "latency", cw=cat_w, mw=mdl_w)
     print(header)
@@ -707,8 +752,9 @@ def print_routing(cat_aggs, categorized, bar, disc_bar, optimize="cost"):
             print("{:<{cw}} {:<{mw}} {:>14} {:>14}".format(
                 c, "NO MODEL CLEARS THE BAR", "-", "-", cw=cat_w, mw=mdl_w))
         else:
+            display_model = model_display.get(model, fmt_model_name(model))
             print("{:<{cw}} {:<{mw}} {:>14} {:>14}".format(
-                c, model, fmt_cost(cpt), fmt_latency(lat_s), cw=cat_w, mw=mdl_w))
+                c, display_model, fmt_cost(cpt), fmt_latency(lat_s), cw=cat_w, mw=mdl_w))
     print()
     pick = ("fastest by median latency that clears the bar, "
             if optimize == "latency" else "cheapest that clears the bar, ")
@@ -958,11 +1004,11 @@ def _frontier_legend_html(agg, colors, rec_cost, rec_lat, incumbent, top_n=None)
         tagtxt = (' <span class="fl-tag">(' + ", ".join(tags) + ")</span>") if tags else ""
         parts.append(
             '<span class="legend-item" data-model="{m}"><span class="swatch" '
-            'style="background:{c}"></span><b>{m}</b>{tag}</span>'.format(
-                c=colors.get(m, "#0969da"), m=esc(m), tag=tagtxt))
+            'style="background:{c}"></span><b>{display_m}</b>{tag}</span>'.format(
+                c=colors.get(m, "#0969da"), m=esc(m), display_m=esc(fmt_model_name(m)), tag=tagtxt))
     if grouped:
         gkey = "+{} more".format(len(grouped))
-        names = ", ".join(g[0].split(":")[-1] for g in grouped)
+        names = ", ".join(fmt_model_name(g[0]) for g in grouped)
         parts.append(
             '<span class="legend-item" data-model="{k}"><span class="swatch" '
             'style="background:{c}"></span><b>{k} models</b> '
@@ -1172,11 +1218,11 @@ def _model_table(agg, winner, incumbent):
         fr_v, d_v, lat_v, c_v = (s["floor_rate"], s["disc"],
                                  s["latency_s"], s["cost_per_test"])
         out.append(
-            '<tr class="{cls}" data-model="{m}"><td class="l">{m}</td>'
+            '<tr class="{cls}" data-model="{m}"><td class="l">{display_m}</td>'
             '<td data-sort="{frs}">{fr}</td><td data-sort="{ds}">{d}</td>'
             '<td data-sort="{ls}">{lat}</td><td data-sort="{cs}">{c}</td>'
             '<td class="l">{tag}</td></tr>'.format(
-                cls="win" if is_win else "", m=esc(m),
+                cls="win" if is_win else "", m=esc(m), display_m=esc(fmt_model_name(m)),
                 frs=(fr_v if fr_v is not None else -1),
                 ds=(d_v if d_v is not None else -1),
                 ls=(lat_v if lat_v is not None else 1e15),
@@ -1218,11 +1264,11 @@ def _owner_summary_html(lead_route, route_cost, route_lat, everyday, labels, opt
             elif i["model"] != everyday:
                 other.setdefault(i["model"], []).append(lbl(c))
         head = ('Run <b>{e}</b> for everyday work: {cats}.').format(
-            e=esc(everyday), cats=esc(", ".join(everyday_cats)))
+            e=esc(fmt_model_name(everyday)), cats=esc(", ".join(everyday_cats)))
         sentences = [head]
         for m in sorted(other):
-            sentences.append('Reach for <b>{m}</b> on {cats}.'.format(
-                m=esc(m), cats=esc(", ".join(sorted(other[m])))))
+            sentences.append('Reach for <b>{mn}</b> on {cats}.'.format(
+                mn=esc(fmt_model_name(m)), cats=esc(", ".join(sorted(other[m])))))
         if none_cats:
             sentences.append('No model clears the bar yet on {cats}; '
                              'review the checks.'.format(
@@ -1245,7 +1291,7 @@ def _owner_summary_html(lead_route, route_cost, route_lat, everyday, labels, opt
                       else route_cost[c][0]) is not None for c in route_cost)
     if disagree:
         frags = ["<b>{c}</b> (cheapest {a}, fastest {b})".format(
-            c=esc(cl), a=esc(mc), b=esc(ml_)) for cl, mc, ml_ in sorted(disagree)]
+            c=esc(cl), a=esc(fmt_model_name(mc)), b=esc(fmt_model_name(ml_))) for cl, mc, ml_ in sorted(disagree)]
         parts.append('<p class="disagree-note">Cheapest and fastest picks differ '
                      'on: ' + "; ".join(frags) + ".</p>")
     elif routed_any:
@@ -1269,13 +1315,13 @@ def _owner_summary_html(lead_route, route_cost, route_lat, everyday, labels, opt
                 'cheapest <span class="mdl">{cm}</span>, fastest '
                 '<span class="mdl">{fm}</span> '
                 '<span class="why">(the two lenses disagree here)</span></li>'.format(
-                    cat=esc(lbl(c)), cm=esc(mc), fm=esc(ml_)))
+                    cat=esc(lbl(c)), cm=esc(fmt_model_name(mc)), fm=esc(fmt_model_name(ml_))))
         else:
             parts.append(
                 '<li><span class="cat">{cat}</span> <span class="arrow">-></span> '
                 'run <span class="mdl">{m}</span> '
                 '<span class="why">({why})</span></li>'.format(
-                    cat=esc(lbl(c)), m=esc(i["model"]), why=esc(i["reason"])))
+                    cat=esc(lbl(c)), m=esc(fmt_model_name(i["model"])), why=esc(i["reason"])))
     parts.append("</ul></div>")
     return "".join(parts)
 
@@ -1302,14 +1348,14 @@ def _dual_routing_html(cat_aggs, bar, disc_bar, labels):
                 '<tr class="none"><td class="l"><b>{cat}</b></td>'
                 '<td class="l" colspan="2">no model clears the bar yet '
                 '({strong} is closest)</td></tr>'.format(
-                    cat=esc(lbl), strong=esc(str(strong))))
+                    cat=esc(lbl), strong=esc(fmt_model_name(str(strong)))))
         elif cheap_m == fast_m:
             parts.append(
                 '<tr><td class="l"><b>{cat}</b></td>'
                 '<td class="l" colspan="2"><span class="mdl">{m}</span> '
                 '<span class="rt-note">cheapest and fastest</span> '
                 '<span class="rt-metric">{cost}, {lat}</span></td></tr>'.format(
-                    cat=esc(lbl), m=esc(cheap_m),
+                    cat=esc(lbl), m=esc(fmt_model_name(cheap_m)),
                     cost=esc(fmt_cost_u(cheap_cost)), lat=esc(fmt_latency(fast_lat))))
         else:
             parts.append(
@@ -1318,8 +1364,8 @@ def _dual_routing_html(cat_aggs, bar, disc_bar, labels):
                 '<span class="rt-metric">{cost}</span></td>'
                 '<td class="l"><span class="mdl">{fm}</span> '
                 '<span class="rt-metric">{lat}</span></td></tr>'.format(
-                    cat=esc(lbl), cm=esc(cheap_m), cost=esc(fmt_cost_u(cheap_cost)),
-                    fm=esc(fast_m), lat=esc(fmt_latency(fast_lat))))
+                    cat=esc(lbl), cm=esc(fmt_model_name(cheap_m)), cost=esc(fmt_cost_u(cheap_cost)),
+                    fm=esc(fmt_model_name(fast_m)), lat=esc(fmt_latency(fast_lat))))
     parts.append('</tbody></table>')
     return "".join(parts)
 
@@ -1344,7 +1390,7 @@ def _drilldown_html(owner_route, cat_aggs, cat_fails, labels, incumbent):
             summ = ('<span class="cat">{cat}</span> <span class="arrow">-></span> '
                     'run <span class="mdl">{m}</span>'
                     '<span class="why">({why})</span>').format(
-                        cat=esc(lbl), m=esc(i["model"]), why=esc(i["reason"]))
+                        cat=esc(lbl), m=esc(fmt_model_name(i["model"])), why=esc(i["reason"]))
             none_attr = ''
         parts.append('<details class="cat"' + none_attr + '><summary>' + summ + '</summary>')
         parts.append('<div class="cat-body">')
@@ -1354,8 +1400,8 @@ def _drilldown_html(owner_route, cat_aggs, cat_fails, labels, incumbent):
             parts.append('<div class="fail-head">Floor tests failed here '
                          '(deduped across repeats)</div><ul class="fails">')
             for m, test, nf, runs in sorted(fails):
-                parts.append('<li><b>{m}</b> fails {t} ({nf}/{runs} runs)</li>'.format(
-                    m=esc(m), t=esc(test), nf=nf, runs=runs))
+                parts.append('<li><b>{mn}</b> fails {t} ({nf}/{runs} runs)</li>'.format(
+                    mn=esc(fmt_model_name(m)), t=esc(test), nf=nf, runs=runs))
             parts.append("</ul>")
         else:
             parts.append('<p class="clean">Every model cleared every floor test '
@@ -1412,10 +1458,10 @@ def _suite_health_html(tests, layered):
         for m in sorted(by_model, key=lambda k: (-len(by_model[k]), k)):
             rows = sorted(by_model[m])
             parts.append(
-                '<details class="cat"><summary><span class="cat">{m}</span> '
+                '<details class="cat"><summary><span class="cat">{mn}</span> '
                 '<span class="why">{n} floor test{s} failed</span></summary>'
                 '<div class="cat-body"><ul class="fails">'.format(
-                    m=esc(m), n=len(rows), s=("" if len(rows) == 1 else "s")))
+                    mn=esc(fmt_model_name(m)), n=len(rows), s=("" if len(rows) == 1 else "s")))
             for test, nf, runs in rows:
                 parts.append('<li>{t} <span style="color:#889">({nf}/{runs} runs)'
                              '</span></li>'.format(t=esc(test), nf=nf, runs=runs))
