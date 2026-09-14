@@ -735,13 +735,17 @@ def _frontier_ylo(agg):
     return min(80, int(math.floor(min(rates) * 100)))
 
 
-# One color per MODEL, shared by both frontier charts and the shared legend, so
-# the same model is the same color everywhere. Greens and purples are held back
-# for the winner / incumbent RING markers, so they are intentionally absent here.
-_MODEL_PALETTE = [
-    "#0969da", "#bc4c00", "#bf3989", "#d1242f",
-    "#9a6700", "#1b7c83", "#953800", "#57606a",
-]
+# Dot palette (adopted from the Broadsheet design's print-ink ramps): color a dot
+# by VENDOR FAMILY and shade it by floor within the family (best = darkest ink).
+# The free / local tier takes the neutral GRAY ramp, so the weakest models recede
+# exactly as in the design. Greens / purples stay reserved for the ring markers.
+_FAMILY_RAMPS = {
+    "anthropic": ["#790e3d", "#aa0b56", "#d82071", "#ff458e", "#ff90b1"],  # magenta ink
+    "cyan":      ["#004961", "#006786", "#1186ac", "#38a6cf", "#62c5ee"],  # cyan / blue (OpenAI + Google)
+    "local":     ["#444141", "#605d5d", "#7d7979", "#9b9797"],             # neutral gray (free / local)
+    "other":     ["#8a6d00", "#b8890f", "#c99a1a", "#edbb00"],             # process yellow (any other vendor)
+}
+_GROUP_GRAY = "#9b9797"   # the collapsed "+N more" group dot
 
 _WIN_RING = "#1a7f37"   # green ring = the pick for THIS chart's metric
 _INC_RING = "#8250df"   # purple dashed ring = incumbent, "you are here"
@@ -761,16 +765,60 @@ _PRICE_PER_M = {
 }
 
 
+def _model_family(model, s):
+    """Which ink ramp a model draws from. Local / free first (they read gray),
+    then vendor by id prefix; anything else falls to the 'other' ramp."""
+    mid = (model or "").lower()
+    if ("ollama" in mid or "localhost" in mid or "127.0.0.1" in mid
+            or "lm-studio" in mid or s.get("cost_per_test") == 0):
+        return "local"
+    if mid.startswith("anthropic") or "claude" in mid:
+        return "anthropic"
+    if (mid.startswith("openai") or "gpt" in mid or "o1" in mid or "o3" in mid
+            or mid.startswith("google") or "gemini" in mid):
+        return "cyan"
+    return "other"
+
+
 def _model_colors(agg):
-    """Stable {model: color} map. Sorted by model id for determinism; the palette
-    cycles when there are more models than colors. Used identically by both
-    frontier charts and the single shared legend, so a model's color is the same
-    on the cost chart, the latency chart, and in the legend."""
-    return {m: _MODEL_PALETTE[i % len(_MODEL_PALETTE)]
-            for i, m in enumerate(sorted(agg))}
+    """{model: color}. Grouped by vendor family, shaded by floor within the family
+    (best = darkest ink). Local / free models take the neutral gray ramp. Same map
+    is used by both frontier charts and the shared legend, so a model's color is
+    identical everywhere."""
+    fam = {}
+    for m, s in agg.items():
+        fam.setdefault(_model_family(m, s), []).append((m, s))
+    colors = {}
+    for f, members in fam.items():
+        ramp = _FAMILY_RAMPS.get(f, _FAMILY_RAMPS["other"])
+        members.sort(key=lambda ms: (ms[1].get("floor_rate") is None,
+                                     -(ms[1].get("floor_rate") or 0.0), ms[0]))
+        for i, (m, _s) in enumerate(members):
+            colors[m] = ramp[min(i, len(ramp) - 1)]
+    return colors
 
 
-def _svg_frontier_plot(agg, colors, metric, ringed, incumbent, ylo):
+def _frontier_rank(items):
+    """Rank (model, stats) pairs by overall quality: floor desc, then disc desc,
+    then id. The single ordering the charts, the group split, and the legend all
+    share so dot identity follows the table's floor-descending order."""
+    return sorted(items, key=lambda ms: (ms[1].get("floor_rate") is None,
+                                          -(ms[1].get("floor_rate") or 0.0),
+                                          -(ms[1].get("disc") or 0.0), ms[0]))
+
+
+def _frontier_split(items, top_n):
+    """Top-N shown individually; the rest collapse to one group whose anchor is the
+    BEST remainder (so the group dot sits at a real coordinate). Only collapses when
+    it would fold at least TWO models - folding a single one into '+1 more' is
+    pointless, so in that case everything is shown."""
+    ranked = _frontier_rank(items)
+    if top_n and top_n > 0 and len(ranked) > top_n + 1:
+        return ranked[:top_n], ranked[top_n:], ranked[top_n]
+    return ranked, [], None
+
+
+def _svg_frontier_plot(agg, colors, metric, ringed, incumbent, ylo, top_n=None):
     """One plot-only frontier SVG (no legend; the legend is shared across both
     charts and rendered once beside them).
 
@@ -794,8 +842,11 @@ def _svg_frontier_plot(agg, colors, metric, ringed, incumbent, ylo):
         return ('<svg width="{w}" height="80"><text x="10" y="45" '
                 'font-family="system-ui" font-size="13">No models reported a {a}; '
                 'nothing to plot on the {a} axis.</text></svg>').format(w=W, a=axis_word)
-    max_x = max(s[field] for _, s in pts) or 1e-9
-    max_x *= 1.15
+    # Rank by floor and split into the top_n shown individually plus a collapsed
+    # gray group anchored at the best remainder. max_x fits only the DRAWN dots.
+    shown, grouped, anchor = _frontier_split(pts, top_n)
+    drawn = shown + ([anchor] if anchor else [])
+    max_x = (max(s[field] for _, s in drawn) or 1e-9) * 1.15
     ylo_f = ylo / 100.0               # fraction
     span = (1.0 - ylo_f) or 1e-9
 
@@ -838,18 +889,19 @@ def _svg_frontier_plot(agg, colors, metric, ringed, incumbent, ylo):
     parts.append('<text transform="translate(14,{y}) rotate(-90)" font-size="11" '
                  'fill="#333" text-anchor="middle">floor pass-rate</text>'.format(
                      y=mt + ph / 2))
-    # dots colored by model identity (shared legend carries the names, so nearby
-    # dots never collide). Incumbent gets a purple dashed ring; the pick for THIS
-    # chart's metric gets a green ring. A model can carry both.
-    for m, s in pts:
+    def xlab(v):
+        return fmt_latency(v) if latency else fmt_cost(v)
+
+    # Top-N shown individually, colored by vendor ink. Incumbent gets a purple
+    # dashed ring; the pick for THIS chart's metric a green ring; a model can carry
+    # both. data-model drives cross-highlight with the legend and table.
+    for m, s in shown:
         x, y = px(s[field]), py(s["floor_rate"])
-        xlabel = ("{v:.3f}s".format(v=s[field]) if latency
-                  else "${v:.4f}".format(v=s[field]))
         parts.append(
             '<g class="cw-dot" data-model="{m}" data-floor="{fr}" '
             'data-metric="{mw}" data-xlabel="{xl}">'.format(
                 m=html.escape(m), fr=html.escape(fmt_rate(s["floor_rate"])),
-                mw=("latency" if latency else "cost"), xl=html.escape(xlabel)))
+                mw=("latency" if latency else "cost"), xl=html.escape(xlab(s[field]))))
         if incumbent and m == incumbent:
             parts.append('<circle cx="{x}" cy="{y}" r="10" fill="none" '
                          'stroke="{c}" stroke-width="2" stroke-dasharray="3 2"/>'.format(
@@ -861,20 +913,35 @@ def _svg_frontier_plot(agg, colors, metric, ringed, incumbent, ylo):
                      'stroke="#fff" stroke-width="1.5"/>'.format(
                          x=x, y=y, c=colors.get(m, "#0969da")))
         parts.append('</g>')
+    # The collapsed remainder: ONE gray dot at the best remainder's real (x, y),
+    # with an always-on "+N" label. Its data-model is the group key so it
+    # cross-highlights with its legend entry.
+    if anchor:
+        am, asx = anchor
+        gx, gy = px(asx[field]), py(asx["floor_rate"])
+        gkey = "+{} more".format(len(grouped))
+        parts.append(
+            '<g class="cw-dot" data-model="{k}" data-floor="{fr}" data-metric="{mw}" '
+            'data-xlabel="{xl}">'.format(
+                k=html.escape(gkey), fr=html.escape(fmt_rate(asx["floor_rate"])),
+                mw=("latency" if latency else "cost"), xl=html.escape(xlab(asx[field]))))
+        parts.append('<circle class="dot" cx="{x}" cy="{y}" r="6" fill="{c}" '
+                     'stroke="#fff" stroke-width="1.5"/>'.format(x=gx, y=gy, c=_GROUP_GRAY))
+        parts.append('<text x="{x}" y="{y}" dy="-9" font-size="10" text-anchor="middle" '
+                     'fill="#667">{k}</text>'.format(x=gx, y=gy, k=html.escape(gkey)))
+        parts.append('</g>')
     parts.append("</svg>")
     return "".join(parts)
 
 
-def _frontier_legend_html(agg, colors, rec_cost, rec_lat, incumbent):
+def _frontier_legend_html(agg, colors, rec_cost, rec_lat, incumbent, top_n=None):
     """The single shared legend for BOTH frontier charts: one row per model with
     its color swatch (same color used in both charts) and BOTH metrics, plus a
     marker key. Rendered once, not duplicated per chart."""
     esc = html.escape
-    rows = sorted(agg.items(),
-                  key=lambda kv: (kv[1].get("cost_per_test") is None,
-                                  kv[1].get("cost_per_test") or 0.0, kv[0]))
+    shown, grouped, _anchor = _frontier_split(list(agg.items()), top_n)
     parts = ['<div class="frontier-legend"><div class="fl-models">']
-    for m, s in rows:
+    for m, s in shown:
         tags = []
         if m == rec_cost:
             tags.append("cheapest")
@@ -887,6 +954,14 @@ def _frontier_legend_html(agg, colors, rec_cost, rec_lat, incumbent):
             '<span class="legend-item" data-model="{m}"><span class="swatch" '
             'style="background:{c}"></span><b>{m}</b>{tag}</span>'.format(
                 c=colors.get(m, "#0969da"), m=esc(m), tag=tagtxt))
+    if grouped:
+        gkey = "+{} more".format(len(grouped))
+        names = ", ".join(g[0].split(":")[-1] for g in grouped)
+        parts.append(
+            '<span class="legend-item" data-model="{k}"><span class="swatch" '
+            'style="background:{c}"></span><b>{k} models</b> '
+            '<span class="fl-tag" style="color:#889">({names})</span></span>'.format(
+                k=esc(gkey), c=_GROUP_GRAY, names=esc(names)))
     # Only advertise a ring when it is actually drawn: the green (pick) ring only
     # exists when some model clears the bar, and the purple (incumbent) ring only
     # when an incumbent was passed. Mentioning an absent ring reads as a bug.
@@ -1453,7 +1528,7 @@ def _run_cost_html(records, judge_id=None):
 
 def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None,
                 cat_aggs=None, categorized=False, optimize="cost", records=None,
-                labels=None, judge_id=None):
+                labels=None, judge_id=None, top_n=8):
     esc = html.escape
     labels = labels or {}
     cat_aggs = cat_aggs if cat_aggs is not None else {}
@@ -1488,9 +1563,9 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
     ylo = _frontier_ylo(agg)
     rec_cost = recommend(agg, bar, disc_bar, "cost")
     rec_lat = recommend(agg, bar, disc_bar, "latency")
-    legend = _frontier_legend_html(agg, colors, rec_cost, rec_lat, incumbent)
-    svg_cost = _svg_frontier_plot(agg, colors, "cost", rec_cost, incumbent, ylo)
-    svg_lat = _svg_frontier_plot(agg, colors, "latency", rec_lat, incumbent, ylo)
+    legend = _frontier_legend_html(agg, colors, rec_cost, rec_lat, incumbent, top_n)
+    svg_cost = _svg_frontier_plot(agg, colors, "cost", rec_cost, incumbent, ylo, top_n)
+    svg_lat = _svg_frontier_plot(agg, colors, "latency", rec_lat, incumbent, ylo, top_n)
     frontiers = (legend
                  + '<div class="frontier-row">'
                  + '<div class="chart"><div class="chart-title">cost vs quality'
@@ -1743,6 +1818,11 @@ def main():
                          "choose. The bar itself is unchanged.")
     ap.add_argument("--incumbent", default=None,
                     help="provider:model you run today, marked 'you are here'")
+    ap.add_argument("--top-n", type=int, default=8,
+                    help="show the top N models (by floor) as individual dots on the "
+                         "frontier charts; collapse the rest into one gray '+X more' "
+                         "point at the best remainder's coordinates (default 8; 0 "
+                         "disables grouping)")
     ap.add_argument("--out", default="report.html", help="HTML report path")
     args = ap.parse_args()
 
@@ -1779,7 +1859,8 @@ def main():
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(render_html(agg, layered, args.bar, args.disc_bar, rec,
                             args.incumbent, tests, cat_aggs, categorized, args.optimize,
-                            records=records, labels=labels, judge_id=judge_id))
+                            records=records, labels=labels, judge_id=judge_id,
+                            top_n=args.top_n))
     print("\nHTML report: " + args.out)
 
 
