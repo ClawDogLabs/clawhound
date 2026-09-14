@@ -608,10 +608,10 @@ def fmt_cost_u(x):
 
 
 def fmt_latency(x):
-    """Median latency in seconds (input is already seconds)."""
+    """Median latency in seconds (input is already seconds), rounded to tenths."""
     if x is None:
         return "n/a"
-    return "{:.3f}".format(x).rstrip("0").rstrip(".") + "s"
+    return "{:.1f}".format(x) + "s"
 
 
 def fmt_model_name(provider_id):
