@@ -1618,13 +1618,13 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
     legend = _frontier_legend_html(agg, colors, rec_cost, rec_lat, incumbent, top_n)
     svg_cost = _svg_frontier_plot(agg, colors, "cost", rec_cost, incumbent, ylo, top_n)
     svg_lat = _svg_frontier_plot(agg, colors, "latency", rec_lat, incumbent, ylo, top_n)
-    frontiers = (legend
-                 + '<div class="frontier-row">'
+    frontiers = ('<div class="frontier-row">'
                  + '<div class="chart"><div class="chart-title">cost vs quality'
                    '</div>' + svg_cost + '</div>'
                  + '<div class="chart"><div class="chart-title">latency vs quality'
                    '</div>' + svg_lat + '</div>'
-                 + '</div>')
+                 + '</div>'
+                 + legend)
 
     overall_table = _model_table(agg, rec_cost, incumbent)
     if categorized and cat_aggs:
