@@ -641,12 +641,12 @@ def fmt_model_name(provider_id):
     name = re.sub(r'-([a-z])', r' \1', name)  # Insert space before lowercase after hyphen
     name = re.sub(r'([a-z])-', r'\1 ', name)  # Insert space after letters before hyphen
     # Add spaces between letters and numbers where needed (e.g., "llama3.1" -> "llama 3.1")
-    # But keep parameter sizes like "14b" and "8b" compact (no space before b/m)
-    name = re.sub(r'([a-z])(\d)', r'\1 \2', name)
+    # But keep version identifiers compact (r1, v2, etc.) and parameter sizes (14b, 8b)
+    name = re.sub(r'([a-z]{2,})(\d)', r'\1 \2', name)  # Split only multi-letter + digits (llama3 -> llama 3)
     name = re.sub(r'(\d)([a-z])', lambda m: m.group(1) + m.group(2) if m.group(2) in 'bm' else m.group(1) + ' ' + m.group(2), name)
     words = name.split()
     formatted = []
-    acronyms = {"gpt": "GPT", "llm": "LLM"}
+    acronyms = {"gpt": "GPT", "llm": "LLM", "deepseek": "DeepSeek"}
     for w in words:
         # Preserve all-caps acronyms like "GPT", treat version numbers as-is
         if w.isupper() and len(w) <= 3:
