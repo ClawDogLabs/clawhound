@@ -587,12 +587,18 @@ def fmt_score(x):
 
 
 def fmt_cost(x):
+    # Per-test cost is fractions of a cent and unreadable at 5-6 decimals, so we
+    # display it per 1,000 tests, a readable dollar figure. Self-describing ("/1k")
+    # because it is also used inline where there is no column header. Absolute run
+    # totals (the run-cost panel) use their own dollar formatter, not this one.
     if x is None:
         return "n/a"
     if x == 0:
-        return "$0"
-    # cost per test is usually small; show per test and per 1k tests
-    return "${:.5f}".format(x).rstrip("0").rstrip(".")
+        return "$0 (free)"
+    per_k = x * 1000.0
+    if per_k < 0.01:
+        return "<$0.01/1k"
+    return "${:,.2f}/1k".format(per_k)
 
 
 def fmt_latency(x):
@@ -608,7 +614,7 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
     name_w = max([len("model")] + [len(m) for m in agg]) + 2
     # Always show cost/test when known; the active metric gets its own column.
     header = "{:<{w}} {:>10} {:>8} {:>14} {:>14}".format(
-        "model", "floor", "disc", "cost/test", "latency", w=name_w)
+        "model", "floor", "disc", "cost/1k", "latency", w=name_w)
     print(header)
     print("-" * len(header))
     for m, s in rows:
@@ -686,7 +692,7 @@ def print_routing(cat_aggs, categorized, bar, disc_bar, optimize="cost"):
     mdl_w = max([len("model")]
                 + [len(t[0]) for t in routing.values() if t[0]]) + 2
     header = "{:<{cw}} {:<{mw}} {:>14} {:>14}".format(
-        "category", "model", "cost/test", "latency", cw=cat_w, mw=mdl_w)
+        "category", "model", "cost/1k", "latency", cw=cat_w, mw=mdl_w)
     print(header)
     print("-" * len(header))
     for c in cats:
@@ -821,11 +827,11 @@ def _svg_frontier_plot(agg, colors, metric, ringed, incumbent, ylo):
     for i in range(0, 5):
         c = max_x * i / 4.0
         x = px(c)
-        lbl = "{v:.3f}s".format(v=c) if latency else "${v:.4f}".format(v=c)
+        lbl = "{v:.3f}s".format(v=c) if latency else "${v:,.2f}".format(v=c * 1000)
         parts.append('<text x="{x}" y="{y}" font-size="10" fill="#667" '
                      'text-anchor="middle">{l}</text>'.format(x=x, y=mt + ph + 16, l=lbl))
     axis_title = ("median latency per test (s), lower is better" if latency
-                  else "cost per test (USD), lower is better")
+                  else "cost per 1,000 tests (USD), lower is better")
     parts.append('<text x="{x}" y="{y}" font-size="11" fill="#333" '
                  'text-anchor="middle">{t}</text>'.format(
                      x=ml + pw / 2, y=H - 8, t=html.escape(axis_title)))
@@ -1074,7 +1080,7 @@ def _model_table(agg, winner, incumbent):
            '<th class="sortable" data-col="1" data-better="hi">floor</th>'
            '<th class="sortable" data-col="2" data-better="hi">disc</th>'
            '<th class="sortable" data-col="3" data-better="lo">latency</th>'
-           '<th class="sortable" data-col="4" data-better="lo">cost/test</th>'
+           '<th class="sortable" data-col="4" data-better="lo">cost /1k</th>'
            '<th class="l"></th>'
            '</tr></thead><tbody>']
     for m, s in rows:
@@ -1292,13 +1298,47 @@ def _suite_health_html(tests, layered):
         parts.append('<p class="clean">No issues: no saturated discriminating '
                      'tests, and every model cleared every floor test.</p>')
         return "".join(parts)
+    total_models = max((t["n_models"] for t in tests.values()
+                        if t["layer"] == "floor"), default=0)
     if regressions:
-        parts.append('<div class="fail-head">Floor failures (regression or '
-                     'coverage gap)</div><ul class="fails">')
+        import collections
+        by_model = collections.OrderedDict()
+        fail_models_by_test = collections.defaultdict(set)
         for m, test, nf, runs in regressions:
-            parts.append('<li><b>{m}</b> fails {t} ({nf}/{runs} runs)</li>'.format(
-                m=esc(m), t=esc(test), nf=nf, runs=runs))
-        parts.append("</ul>")
+            by_model.setdefault(m, []).append((test, nf, runs))
+            fail_models_by_test[test].add(m)
+
+        # Tests failed by many models are almost always the TEST's fault (too
+        # strict, or naked-recall), not a real per-model regression. Surface them
+        # first so the reviewer fixes the suite, not the models.
+        thresh = max(2, (total_models + 1) // 2) if total_models else 2
+        suspect = sorted(((t, len(ms)) for t, ms in fail_models_by_test.items()
+                          if len(ms) >= thresh), key=lambda x: (-x[1], x[0]))
+        if suspect:
+            parts.append('<div class="fail-head" style="color:#8a6d00">Floor tests '
+                         'failed by many models (likely the TEST, not the models - '
+                         'too strict or naked-recall; review these first)</div>'
+                         '<ul class="sat">')
+            for t, n in suspect:
+                parts.append('<li>{t} <span style="color:#889">- fails {n}/{tot} '
+                             'models</span></li>'.format(
+                                 t=esc(t), n=n, tot=(total_models or "?")))
+            parts.append("</ul>")
+
+        # Per-model, collapsible (worst first). Collapsed by default so the section
+        # stays short; Expand-all opens them.
+        parts.append('<div class="fail-head">Floor failures by model</div>')
+        for m in sorted(by_model, key=lambda k: (-len(by_model[k]), k)):
+            rows = sorted(by_model[m])
+            parts.append(
+                '<details class="cat"><summary><span class="cat">{m}</span> '
+                '<span class="why">{n} floor test{s} failed</span></summary>'
+                '<div class="cat-body"><ul class="fails">'.format(
+                    m=esc(m), n=len(rows), s=("" if len(rows) == 1 else "s")))
+            for test, nf, runs in rows:
+                parts.append('<li>{t} <span style="color:#889">({nf}/{runs} runs)'
+                             '</span></li>'.format(t=esc(test), nf=nf, runs=runs))
+            parts.append('</ul></div></details>')
     if saturated:
         parts.append('<div class="fail-head" style="color:#8a6d00">Saturated '
                      'discriminating tests (no ranking signal; harden or retire)'
@@ -1488,7 +1528,7 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
 <h2>Cost and latency vs quality</h2>
 {frontiers}
 <h2>All models at a glance</h2>
-<p style="font-size:.83rem;color:#4a5568;background:#f3f5f8;border:1px solid #e2e6ec;border-radius:6px;padding:.55rem .75rem;margin:.4rem 0 .9rem;line-height:1.55"><b>floor</b>: must-pass correctness and guardrails, the routing gate (you want 100%). &nbsp; <b>disc</b>: discriminating, the graded hard-reasoning score, 0 to 1, used to rank models. &nbsp; <b>latency</b>: median response time. &nbsp; <b>cost/test</b>: average API cost per test.</p>
+<p style="font-size:.83rem;color:#4a5568;background:#f3f5f8;border:1px solid #e2e6ec;border-radius:6px;padding:.55rem .75rem;margin:.4rem 0 .9rem;line-height:1.55"><b>floor</b>: must-pass correctness and guardrails, the routing gate (you want 100%). &nbsp; <b>disc</b>: discriminating, the graded hard-reasoning score, 0 to 1, used to rank models. &nbsp; <b>latency</b>: median response time. &nbsp; <b>cost /1k</b>: average API cost per 1,000 tests (per-test is fractions of a cent; the run-cost panel below shows real totals).</p>
 {overall_table}
 {dual_table}
 {drilldown}
@@ -1653,7 +1693,7 @@ def _selftest():
     # two frontier charts: one cost-x, one latency-x, both axis titles present.
     assert "cost vs quality" in doc, "cost frontier title missing from HTML"
     assert "latency vs quality" in doc, "latency frontier title missing from HTML"
-    assert "cost per test (USD)" in doc, "cost x-axis label missing from HTML"
+    assert "cost per 1,000 tests (USD)" in doc, "cost x-axis label missing from HTML"
     assert "median latency per test (s)" in doc, "latency x-axis label missing from HTML"
     # exactly ONE shared model legend serves both charts.
     assert doc.count('class="frontier-legend"') == 1, "legend must be shared, not per-chart"
