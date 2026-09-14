@@ -1609,7 +1609,7 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
 <h2>Cost and latency vs quality</h2>
 {frontiers}
 <h2>All models at a glance</h2>
-<p style="font-size:.83rem;color:#4a5568;background:#f3f5f8;border:1px solid #e2e6ec;border-radius:6px;padding:.55rem .75rem;margin:.4rem 0 .9rem;line-height:1.55"><b>floor</b>: must-pass correctness and guardrails, the routing gate (you want 100%). &nbsp; <b>disc</b>: discriminating, the graded hard-reasoning score, 0 to 1, used to rank models. &nbsp; <b>latency</b>: median response time. &nbsp; <b>cost /100</b>: average API cost per 100 tests (per-test is fractions of a cent; the run-cost panel below shows real totals).</p>
+<p style="font-size:.83rem;color:#4a5568;background:#f3f5f8;border:1px solid #e2e6ec;border-radius:6px;padding:.55rem .75rem;margin:.4rem 0 .9rem;line-height:1.55"><b>floor</b>: must-pass correctness and guardrails, the routing gate (you want 100%). &nbsp; <b>disc</b>: discriminating, the graded hard-reasoning score, 0 to 1, used to rank models. &nbsp; <b>latency</b>: median response time. &nbsp; <b>cost /100</b>: API cost per 100 tests <b>measured on this suite</b> - it reflects each model's own verbosity here, not just its list price, so it moves if your real tasks are longer (per-test is fractions of a cent; the run-cost panel shows real totals).</p>
 {overall_table}
 {dual_table}
 {drilldown}
