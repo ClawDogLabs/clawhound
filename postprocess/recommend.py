@@ -1014,12 +1014,10 @@ def _frontier_legend_html(agg, colors, rec_cost, rec_lat, incumbent, top_n=None)
                 c=colors.get(m, "#0969da"), m=esc(m), display_m=esc(fmt_model_name(m)), tag=tagtxt))
     if grouped:
         gkey = "+{} more".format(len(grouped))
-        names = ", ".join(fmt_model_name(g[0]) for g in grouped)
         parts.append(
             '<span class="legend-item" data-model="{k}"><span class="swatch" '
-            'style="background:{c}"></span><b>{k} models</b> '
-            '<span class="fl-tag" style="color:#889">({names})</span></span>'.format(
-                k=esc(gkey), c=_GROUP_GRAY, names=esc(names)))
+            'style="background:{c}"></span><b>{k} models</b></span>'.format(
+                k=esc(gkey), c=_GROUP_GRAY))
     parts.append('</div></div>')
     return "".join(parts)
 
