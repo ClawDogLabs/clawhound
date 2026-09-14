@@ -641,8 +641,9 @@ def fmt_model_name(provider_id):
     name = re.sub(r'-([a-z])', r' \1', name)  # Insert space before lowercase after hyphen
     name = re.sub(r'([a-z])-', r'\1 ', name)  # Insert space after letters before hyphen
     # Add spaces between letters and numbers where needed (e.g., "llama3.1" -> "llama 3.1")
+    # But keep parameter sizes like "14b" and "8b" compact (no space before b/m)
     name = re.sub(r'([a-z])(\d)', r'\1 \2', name)
-    name = re.sub(r'(\d)([a-z])', r'\1 \2', name)
+    name = re.sub(r'(\d)([a-z])', lambda m: m.group(1) + m.group(2) if m.group(2) in 'bm' else m.group(1) + ' ' + m.group(2), name)
     words = name.split()
     formatted = []
     acronyms = {"gpt": "GPT", "llm": "LLM"}
