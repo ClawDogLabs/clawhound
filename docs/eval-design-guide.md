@@ -187,6 +187,12 @@ it is cheaper, faster, and not subject to judge noise. Reserve the graded judge
 for genuine reasoning. Hold the judge model constant (set it once in
 `defaultTest.options.provider`) so it is never a moving variable.
 
+Choose the judge deliberately: one strong model you have a key for, ideally NOT one
+of the models under test (so it cannot favor itself), with `config: { max_tokens:
+16000 }` so a reasoning judge has room to emit a grade rather than spending its whole
+budget thinking. A mid-tier judge (not the priciest model) keeps cost down, since
+grading is usually the bulk of a run's spend.
+
 ## Assertion gotchas (from real runs)
 
 - **Quote every `g-eval` and `llm-rubric` criterion string.** A `": "` inside an

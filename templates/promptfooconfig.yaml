@@ -14,6 +14,9 @@ description: clawhound suite
 
 # Models to put head to head. Any provider promptfoo supports.
 providers:
+  # Reasoning models need output headroom: add `config: { max_tokens: 16000 }` to any
+  # thinking model (and to the judge below), or it may burn its budget on hidden
+  # reasoning and return an empty answer (promptfoo's default is only 2048 tokens).
   - anthropic:messages:claude-opus-4-8      # example incumbent
   - anthropic:messages:claude-haiku-4-5     # a cheaper Anthropic model
   # - openai:gpt-5-mini
@@ -28,10 +31,18 @@ providers:
 prompts:
   - "You are the assistant under test. {{input}}"
 
-# The graded judge, held constant across every model so it is not a moving variable.
+# The graded judge (llm-rubric / g-eval), held CONSTANT across every model so it is
+# not a moving variable. Configurable: pick ONE strong model you have an API key for
+# - it need NOT be a model you are testing (ideally it is not, so it cannot favor
+# itself). A mid-tier judge keeps grading cost down (grading is usually the bulk of a
+# run's spend). Give a reasoning judge output headroom via max_tokens or it may spend
+# its whole budget thinking and return an empty grade. Swap the id for your provider,
+# e.g. openai:gpt-5 or google:gemini-2.5-pro.
 defaultTest:
   options:
-    provider: anthropic:messages:claude-opus-4-8
+    provider:
+      id: anthropic:messages:claude-sonnet-5
+      config: { max_tokens: 16000 }
 
 tests:
   # ---------- FLOOR: deterministic, must pass. The signal is any drop. ----------
