@@ -740,6 +740,20 @@ _MODEL_PALETTE = [
 _WIN_RING = "#1a7f37"   # green ring = the pick for THIS chart's metric
 _INC_RING = "#8250df"   # purple dashed ring = incumbent, "you are here"
 
+# Approximate list prices ($ per 1M input, $ per 1M output) for models we know,
+# used ONLY to estimate GRADING spend from the judge's grading tokens: promptfoo
+# prices generation itself but does not price grading. Provider/generation cost
+# always comes from promptfoo's own per-record figure, so a missing entry here
+# never affects it; it only means the judge's grading cost shows "not auto-priced".
+# Keyed by a substring of the model id. Update when prices change.
+_PRICE_PER_M = {
+    "claude-opus-4-8": (5, 25), "claude-opus-5": (5, 25),
+    "claude-opus-4-7": (5, 25), "claude-opus-4-6": (5, 25),
+    "claude-sonnet-5": (3, 15), "claude-sonnet-4-6": (3, 15),
+    "claude-haiku-4-5": (1, 5), "claude-fable-5": (10, 50),
+    "gpt-6-astra": (10, 50),
+}
+
 
 def _model_colors(agg):
     """Stable {model: color} map. Sorted by model id for determinism; the palette
@@ -992,6 +1006,18 @@ table.models th.sortable:hover { color: #0969da; }
 table.models th.sortable::after { content: " \\2195"; color: #c4cbd6; font-weight: 400; }
 table.models th.sortable.sorted[data-dir="desc"]::after { content: " \\25BC"; color: #0969da; }
 table.models th.sortable.sorted[data-dir="asc"]::after { content: " \\25B2"; color: #0969da; }
+table.runcost { border-collapse: collapse; font-size: .84rem; width: 100%; margin: .3rem 0 .5rem; }
+table.runcost th { text-align: right; padding: .3rem .6rem; border-bottom: 1px solid #dde2ea;
+  color: #667; font-weight: 600; white-space: nowrap; }
+table.runcost th.l, table.runcost td.l { text-align: left; }
+table.runcost td { text-align: right; padding: .3rem .6rem; border-bottom: 1px solid #f0f2f6;
+  white-space: nowrap; }
+table.runcost tr.subtotal td, table.runcost tr.total td { font-weight: 700;
+  border-top: 2px solid #dde2ea; background: #f8fafc; }
+table.runcost tr.grading td { color: #6b3fb0; }
+.runcost-head { font-size: .95rem; color: #1a1f2b; margin: .2rem 0 .55rem; }
+.runcost-head b { color: #0f5a2a; }
+.runcost-note { font-size: .78rem; color: #889; margin: .35rem 0; }
 """
 
 
@@ -1283,9 +1309,108 @@ def _suite_health_html(tests, layered):
     return "".join(parts)
 
 
+def _run_cost_html(records, judge_id=None):
+    """A run-cost-and-tokens panel: per-model generation tokens (prompt /
+    completion / reasoning) and cost, a generation subtotal, the grading (judge)
+    tokens with an estimated cost, and a grand total. Mirrors promptfoo's
+    end-of-run token summary and adds the spend. Generation cost is promptfoo's own
+    per-record figure; grading cost is estimated from the judge's grading tokens at
+    its list price (see _PRICE_PER_M), since promptfoo does not price grading."""
+    esc = html.escape
+    import collections
+    prov = collections.OrderedDict()
+    g_p = g_c = 0
+    for rec in records or []:
+        pid = rec.get("provider")
+        pid = pid.get("id") if isinstance(pid, dict) else pid
+        pid = pid or "?"
+        tu = (rec.get("response") or {}).get("tokenUsage") or rec.get("tokenUsage") or {}
+        cd = tu.get("completionDetails") or {}
+        d = prov.setdefault(pid, {"req": 0, "p": 0, "c": 0, "r": 0, "t": 0, "cost": 0.0})
+        d["req"] += 1
+        p_ = tu.get("prompt") or 0
+        c_ = tu.get("completion") or 0
+        d["p"] += p_
+        d["c"] += c_
+        d["r"] += cd.get("reasoning") or 0
+        # Use promptfoo's own per-record total: providers disagree on whether
+        # reasoning is counted inside completion (opus) or added on top (gemini),
+        # and this total resolves it. Fall back to prompt+completion if absent.
+        d["t"] += tu.get("total") or (p_ + c_)
+        cst = rec.get("cost")
+        if isinstance(cst, (int, float)):
+            d["cost"] += cst
+        gtu = (rec.get("gradingResult") or {}).get("tokensUsed") or {}
+        g_p += gtu.get("prompt") or 0
+        g_c += gtu.get("completion") or 0
+    if not prov:
+        return ""
+    tot = {"req": 0, "p": 0, "c": 0, "r": 0, "t": 0, "cost": 0.0}
+    for d in prov.values():
+        for k in tot:
+            tot[k] += d[k]
+    gen_tokens = tot["t"]
+    grade_tokens = g_p + g_c
+    total_tokens = gen_tokens + grade_tokens
+    jprice = None
+    if judge_id:
+        for k, v in _PRICE_PER_M.items():
+            if k in judge_id:
+                jprice = v
+                break
+    grade_cost = (g_p * jprice[0] / 1e6 + g_c * jprice[1] / 1e6) if jprice else None
+    total_cost = tot["cost"] + (grade_cost or 0.0)
+    jname = esc(judge_id.split(":")[-1]) if judge_id else "?"
+    C = lambda n: "{:,}".format(int(n))
+    D = lambda x: "${:,.2f}".format(x)
+
+    out = ['<h2>Run cost and tokens</h2>']
+    if grade_cost is not None:
+        head = ('Total run spend <b>~{tc}</b>: generation {gc} + grading ~{grc} '
+                '(judge {j}, estimated). {tt} tokens = {gen} generation + {grd} '
+                'grading.').format(tc=D(total_cost), gc=D(tot["cost"]),
+                                   grc=D(grade_cost), j=jname, tt=C(total_tokens),
+                                   gen=C(gen_tokens), grd=C(grade_tokens))
+    else:
+        head = ('Generation spend <b>{gc}</b> over {gen} generation tokens; grading '
+                'used {grd} tokens on the judge (not auto-priced here). {tt} tokens '
+                'total.').format(gc=D(tot["cost"]), gen=C(gen_tokens),
+                                 grd=C(grade_tokens), tt=C(total_tokens))
+    out.append('<p class="runcost-head">' + head + '</p>')
+    out.append('<table class="runcost"><thead><tr><th class="l">model</th>'
+               '<th>requests</th><th>prompt</th><th>completion</th><th>reasoning</th>'
+               '<th>total tokens</th><th>cost</th></tr></thead><tbody>')
+    for pid, d in sorted(prov.items(),
+                         key=lambda kv: (-kv[1]["cost"], -(kv[1]["p"] + kv[1]["c"]))):
+        out.append('<tr><td class="l">{m}</td><td>{rq}</td><td>{p}</td><td>{c}</td>'
+                   '<td>{r}</td><td>{t}</td><td>{cost}</td></tr>'.format(
+                       m=esc(pid), rq=C(d["req"]), p=C(d["p"]), c=C(d["c"]),
+                       r=C(d["r"]), t=C(d["t"]),
+                       cost=(D(d["cost"]) if d["cost"] else "$0.00 (local)")))
+    out.append('<tr class="subtotal"><td class="l">generation subtotal</td>'
+               '<td>{rq}</td><td>{p}</td><td>{c}</td><td>{r}</td><td>{t}</td>'
+               '<td>{cost}</td></tr>'.format(rq=C(tot["req"]), p=C(tot["p"]),
+                                             c=C(tot["c"]), r=C(tot["r"]),
+                                             t=C(gen_tokens), cost=D(tot["cost"])))
+    grc = ("~" + D(grade_cost) + " est" if grade_cost is not None else "not auto-priced")
+    out.append('<tr class="grading"><td class="l">grading (judge {j})</td><td></td>'
+               '<td>{p}</td><td>{c}</td><td>-</td><td>{t}</td><td>{gc}</td></tr>'.format(
+                   j=jname, p=C(g_p), c=C(g_c), t=C(grade_tokens), gc=grc))
+    out.append('<tr class="total"><td class="l">total</td><td></td><td></td><td></td>'
+               '<td></td><td>{t}</td><td>{tc}</td></tr>'.format(
+                   t=C(total_tokens),
+                   tc=("~" + D(total_cost) if grade_cost is not None else D(tot["cost"]))))
+    out.append('</tbody></table>')
+    out.append('<p class="runcost-note">Generation cost is promptfoo\'s own '
+               'per-model figure. Grading cost is estimated from the judge\'s grading '
+               'tokens at its list price (promptfoo does not price grading). Local '
+               'models are free.</p>')
+    return "".join(out)
+
+
 def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None,
                 cat_aggs=None, categorized=False, optimize="cost", records=None,
-                labels=None):
+                labels=None, judge_id=None):
     esc = html.escape
     labels = labels or {}
     cat_aggs = cat_aggs if cat_aggs is not None else {}
@@ -1340,6 +1465,7 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
         dual_table = ""
         drilldown = ""
     health = _suite_health_html(tests if tests is not None else {}, layered)
+    runcost = _run_cost_html(records or [], judge_id)
     db = ("" if disc_bar <= 0
           else ", disc score at or above {:.2f}".format(disc_bar))
 
@@ -1363,6 +1489,7 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
 {overall_table}
 {dual_table}
 {drilldown}
+{runcost}
 {health}
 <p class="foot">Bar: floor pass-rate at or above {barp:.0f}%{db}. Generated by clawhound from a promptfoo results file.</p>
 </div>
@@ -1371,7 +1498,7 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
         css=_REPORT_CSS, owner=owner, note=note, frontiers=frontiers,
         dual_table=dual_table, overall_table=overall_table,
         drilldown=drilldown, health=health, barp=bar * 100, db=db,
-        script=_REPORT_JS)
+        runcost=runcost, script=_REPORT_JS)
 
 
 # ----------------------------------------------------------------------------
@@ -1587,6 +1714,15 @@ def main():
     records = load_records(args.results)
     if not records:
         sys.exit("no evaluation records found in " + args.results)
+    # The graded judge is pinned in the config; read it so the run-cost panel can
+    # estimate grading spend (promptfoo does not price grading itself).
+    judge_id = None
+    try:
+        _cfg = json.load(open(args.results, encoding="utf-8")).get("config", {})
+        _jp = ((_cfg.get("defaultTest") or {}).get("options") or {}).get("provider")
+        judge_id = _jp.get("id") if isinstance(_jp, dict) else _jp
+    except Exception:
+        judge_id = None
 
     agg, layered = aggregate(records)
     tests = aggregate_tests(records)
@@ -1600,7 +1736,7 @@ def main():
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(render_html(agg, layered, args.bar, args.disc_bar, rec,
                             args.incumbent, tests, cat_aggs, categorized, args.optimize,
-                            records=records, labels=labels))
+                            records=records, labels=labels, judge_id=judge_id))
     print("\nHTML report: " + args.out)
 
 
