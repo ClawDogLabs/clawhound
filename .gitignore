@@ -12,3 +12,4 @@ results.json
 *.results.json
 .promptfoo/
 report.html
+digest.html

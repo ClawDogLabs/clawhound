@@ -587,18 +587,24 @@ def fmt_score(x):
 
 
 def fmt_cost(x):
-    # Per-test cost is fractions of a cent and unreadable at 5-6 decimals, so we
-    # display it per 100 tests, a readable dollar figure. Self-describing ("/100")
-    # because it is also used inline where there is no column header. Absolute run
-    # totals (the run-cost panel) use their own dollar formatter, not this one.
+    # Cost per 100 tests, as a bare dollar figure - the unit lives in the column
+    # header / axis title ("cost /100"), not repeated on every value. Absolute run
+    # totals use their own formatter (the run-cost panel).
     if x is None:
         return "n/a"
     if x == 0:
         return "$0 (free)"
     per_c = x * 100.0
     if per_c < 0.01:
-        return "<$0.01/100"
-    return "${:,.2f}/100".format(per_c)
+        return "<$0.01"
+    return "${:,.2f}".format(per_c)
+
+
+def fmt_cost_u(x):
+    """fmt_cost with the '/100' unit appended - for inline spots (per-service
+    routing, the chart tooltip) that have no column header to carry the unit."""
+    c = fmt_cost(x)
+    return c + "/100" if c.startswith("$") and c != "$0 (free)" else c
 
 
 def fmt_latency(x):
@@ -890,7 +896,7 @@ def _svg_frontier_plot(agg, colors, metric, ringed, incumbent, ylo, top_n=None):
                  'fill="#333" text-anchor="middle">floor pass-rate</text>'.format(
                      y=mt + ph / 2))
     def xlab(v):
-        return fmt_latency(v) if latency else fmt_cost(v)
+        return fmt_latency(v) if latency else fmt_cost_u(v)
 
     # Top-N shown individually, colored by vendor ink. Incumbent gets a purple
     # dashed ring; the pick for THIS chart's metric a green ring; a model can carry
@@ -1304,7 +1310,7 @@ def _dual_routing_html(cat_aggs, bar, disc_bar, labels):
                 '<span class="rt-note">cheapest and fastest</span> '
                 '<span class="rt-metric">{cost}, {lat}</span></td></tr>'.format(
                     cat=esc(lbl), m=esc(cheap_m),
-                    cost=esc(fmt_cost(cheap_cost)), lat=esc(fmt_latency(fast_lat))))
+                    cost=esc(fmt_cost_u(cheap_cost)), lat=esc(fmt_latency(fast_lat))))
         else:
             parts.append(
                 '<tr><td class="l"><b>{cat}</b></td>'
@@ -1312,7 +1318,7 @@ def _dual_routing_html(cat_aggs, bar, disc_bar, labels):
                 '<span class="rt-metric">{cost}</span></td>'
                 '<td class="l"><span class="mdl">{fm}</span> '
                 '<span class="rt-metric">{lat}</span></td></tr>'.format(
-                    cat=esc(lbl), cm=esc(cheap_m), cost=esc(fmt_cost(cheap_cost)),
+                    cat=esc(lbl), cm=esc(cheap_m), cost=esc(fmt_cost_u(cheap_cost)),
                     fm=esc(fast_m), lat=esc(fmt_latency(fast_lat))))
     parts.append('</tbody></table>')
     return "".join(parts)
