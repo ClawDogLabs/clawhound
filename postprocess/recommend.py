@@ -823,6 +823,13 @@ def _svg_frontier_plot(agg, colors, metric, ringed, incumbent, ylo):
     # chart's metric gets a green ring. A model can carry both.
     for m, s in pts:
         x, y = px(s[field]), py(s["floor_rate"])
+        xlabel = ("{v:.3f}s".format(v=s[field]) if latency
+                  else "${v:.4f}".format(v=s[field]))
+        parts.append(
+            '<g class="cw-dot" data-model="{m}" data-floor="{fr}" '
+            'data-metric="{mw}" data-xlabel="{xl}">'.format(
+                m=html.escape(m), fr=html.escape(fmt_rate(s["floor_rate"])),
+                mw=("latency" if latency else "cost"), xl=html.escape(xlabel)))
         if incumbent and m == incumbent:
             parts.append('<circle cx="{x}" cy="{y}" r="10" fill="none" '
                          'stroke="{c}" stroke-width="2" stroke-dasharray="3 2"/>'.format(
@@ -830,9 +837,10 @@ def _svg_frontier_plot(agg, colors, metric, ringed, incumbent, ylo):
         if m == ringed:
             parts.append('<circle cx="{x}" cy="{y}" r="12" fill="none" '
                          'stroke="{c}" stroke-width="2.5"/>'.format(x=x, y=y, c=_WIN_RING))
-        parts.append('<circle cx="{x}" cy="{y}" r="6" fill="{c}" '
+        parts.append('<circle class="dot" cx="{x}" cy="{y}" r="6" fill="{c}" '
                      'stroke="#fff" stroke-width="1.5"/>'.format(
                          x=x, y=y, c=colors.get(m, "#0969da")))
+        parts.append('</g>')
     parts.append("</svg>")
     return "".join(parts)
 
@@ -856,17 +864,14 @@ def _frontier_legend_html(agg, colors, rec_cost, rec_lat, incumbent):
             tags.append("you are here")
         tagtxt = (' <span class="fl-tag">(' + ", ".join(tags) + ")</span>") if tags else ""
         parts.append(
-            '<span class="legend-item"><span class="swatch" style="background:{c}">'
-            '</span><b>{m}</b>{tag} <span class="fl-metrics">{fr} floor, {cost}, {lat}'
-            '</span></span>'.format(
-                c=colors.get(m, "#0969da"), m=esc(m), tag=tagtxt,
-                fr=esc(fmt_rate(s["floor_rate"])),
-                cost=esc(fmt_cost(s["cost_per_test"])),
-                lat=esc(fmt_latency(s["latency_s"]))))
+            '<span class="legend-item" data-model="{m}"><span class="swatch" '
+            'style="background:{c}"></span><b>{m}</b>{tag}</span>'.format(
+                c=colors.get(m, "#0969da"), m=esc(m), tag=tagtxt))
     parts.append('</div><div class="fl-key">'
                  '<span class="k-ring win"></span> green ring = pick for that chart'
                  '&nbsp;&nbsp; <span class="k-ring inc"></span> purple ring = you '
-                 'are here</div></div>')
+                 'are here&nbsp;&nbsp; hover or click a model to highlight it in both '
+                 'charts (metrics are in the table below)</div></div>')
     return "".join(parts)
 
 
@@ -956,6 +961,67 @@ ul.sat li { font-size: .86rem; color: #333; margin: .18rem 0; }
   border: 1px solid #cdd3dd; background: #fff; border-radius: 6px;
   box-shadow: 0 1px 3px rgba(0,0,0,.12); }
 .controls button:hover { background: #eef1f6; }
+/* interactivity: cross-highlight (legend <-> both charts <-> table) + tooltip + sort */
+.legend-item { cursor: pointer; padding: .12rem .3rem; border-radius: 5px;
+  transition: opacity .1s, background .1s; }
+.legend-item.cw-on { background: #eef4ff; }
+.cw-dot { cursor: pointer; }
+.cw-dot circle.dot { transition: opacity .1s; }
+body.cw-hl .cw-dot:not(.cw-on) { opacity: .15; }
+body.cw-hl .legend-item:not(.cw-on) { opacity: .32; }
+body.cw-hl table.models tbody tr:not(.cw-on) { opacity: .34; }
+.cw-dot.cw-on circle.dot { stroke: #1a1f2b; stroke-width: 2.5; }
+table.models tbody tr { cursor: pointer; }
+table.models tbody tr.cw-on { outline: 2px solid #0969da; outline-offset: -2px; }
+.cw-tip { position: fixed; z-index: 50; background: #1a1f2b; color: #fff;
+  font-size: .76rem; padding: .38rem .55rem; border-radius: 6px; pointer-events: none;
+  line-height: 1.4; box-shadow: 0 2px 10px rgba(0,0,0,.28); max-width: 260px; }
+.sort-hint { font-size: .78rem; color: #889; margin: .1rem 0 .45rem; }
+table.models th.sortable { cursor: pointer; user-select: none; }
+table.models th.sortable:hover { color: #0969da; }
+table.models th.sortable::after { content: " \\2195"; color: #c4cbd6; font-weight: 400; }
+table.models th.sortable.sorted[data-dir="desc"]::after { content: " \\25BC"; color: #0969da; }
+table.models th.sortable.sorted[data-dir="asc"]::after { content: " \\25B2"; color: #0969da; }
+"""
+
+
+# Interactivity, kept out of the .format() template so its many braces need no
+# escaping. Injected as {script}. cwAll = expand/collapse; the IIFE wires
+# cross-highlight (legend <-> both charts <-> table), the dot tooltip, and the
+# sortable all-models table. Cross-highlight keys on data-model, present on every
+# legend item, chart dot (as <g class="cw-dot">), and table row.
+_REPORT_JS = """
+function cwAll(o){document.querySelectorAll('details').forEach(function(d){d.open=o;});}
+(function(){
+  var pinned=null;
+  function nodesFor(model){return Array.prototype.filter.call(document.querySelectorAll('[data-model]'),function(e){return e.getAttribute('data-model')===model;});}
+  function clearHi(){document.body.classList.remove('cw-hl');Array.prototype.forEach.call(document.querySelectorAll('.cw-on'),function(e){e.classList.remove('cw-on');});}
+  function setHi(model){clearHi();document.body.classList.add('cw-hl');nodesFor(model).forEach(function(e){e.classList.add('cw-on');});}
+  Array.prototype.forEach.call(document.querySelectorAll('[data-model]'),function(el){
+    var model=el.getAttribute('data-model');
+    el.addEventListener('mouseenter',function(){if(!pinned)setHi(model);});
+    el.addEventListener('mouseleave',function(){if(!pinned)clearHi();});
+    el.addEventListener('click',function(){if(pinned===model){pinned=null;clearHi();}else{pinned=model;setHi(model);}});
+  });
+  var tip=document.createElement('div');tip.className='cw-tip';tip.style.display='none';document.body.appendChild(tip);
+  function show(d,e){tip.innerHTML='<b>'+d.getAttribute('data-model')+'</b><br>floor '+d.getAttribute('data-floor')+' \\u00b7 '+d.getAttribute('data-metric')+' '+d.getAttribute('data-xlabel');tip.style.display='block';tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';}
+  Array.prototype.forEach.call(document.querySelectorAll('.cw-dot'),function(d){
+    d.addEventListener('mouseenter',function(e){show(d,e);});
+    d.addEventListener('mousemove',function(e){show(d,e);});
+    d.addEventListener('mouseleave',function(){tip.style.display='none';});
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('table.models th.sortable'),function(th){
+    th.addEventListener('click',function(){
+      var tb=th.closest('table').querySelector('tbody'),idx=+th.getAttribute('data-col'),better=th.getAttribute('data-better'),cur=th.getAttribute('data-dir');
+      var dir=cur?(cur==='asc'?'desc':'asc'):(better==='hi'?'desc':'asc');
+      Array.prototype.forEach.call(th.parentNode.children,function(o){o.removeAttribute('data-dir');o.classList.remove('sorted');});
+      th.setAttribute('data-dir',dir);th.classList.add('sorted');
+      var rows=Array.prototype.slice.call(tb.querySelectorAll('tr'));
+      rows.sort(function(a,b){var av=parseFloat(a.children[idx].getAttribute('data-sort')),bv=parseFloat(b.children[idx].getAttribute('data-sort'));if(isNaN(av))av=-1e15;if(isNaN(bv))bv=-1e15;return dir==='asc'?av-bv:bv-av;});
+      rows.forEach(function(r){tb.appendChild(r);});
+    });
+  });
+})();
 """
 
 
@@ -965,22 +1031,35 @@ def _model_table(agg, winner, incumbent):
     esc = html.escape
     rows = sorted(agg.items(), key=lambda kv: (kv[1]["floor_rate"] is None,
                                                -(kv[1]["floor_rate"] or 0)))
-    out = ['<table class="models"><thead><tr>'
-           '<th class="l">model</th><th>floor</th><th>disc</th>'
-           '<th>latency</th><th>cost/test</th><th class="l"></th>'
+    out = ['<p class="sort-hint">Click a column to sort (best first; click again to '
+           'flip). Hover a row to highlight that model in the charts.</p>'
+           '<table class="models"><thead><tr>'
+           '<th class="l">model</th>'
+           '<th class="sortable" data-col="1" data-better="hi">floor</th>'
+           '<th class="sortable" data-col="2" data-better="hi">disc</th>'
+           '<th class="sortable" data-col="3" data-better="lo">latency</th>'
+           '<th class="sortable" data-col="4" data-better="lo">cost/test</th>'
+           '<th class="l"></th>'
            '</tr></thead><tbody>']
     for m, s in rows:
         is_win = (m == winner)
         is_here = (incumbent and m == incumbent)
         tag = ('<span class="win-tag">run this</span>' if is_win
                else ('<span class="here-tag">you are here</span>' if is_here else ""))
+        fr_v, d_v, lat_v, c_v = (s["floor_rate"], s["disc"],
+                                 s["latency_s"], s["cost_per_test"])
         out.append(
-            '<tr class="{cls}"><td class="l">{m}</td><td>{fr}</td><td>{d}</td>'
-            '<td>{lat}</td><td>{c}</td><td class="l">{tag}</td></tr>'.format(
-                cls="win" if is_win else "",
-                m=esc(m), fr=esc(fmt_rate(s["floor_rate"])),
-                d=esc(fmt_score(s["disc"])), lat=esc(fmt_latency(s["latency_s"])),
-                c=esc(fmt_cost(s["cost_per_test"])), tag=tag))
+            '<tr class="{cls}" data-model="{m}"><td class="l">{m}</td>'
+            '<td data-sort="{frs}">{fr}</td><td data-sort="{ds}">{d}</td>'
+            '<td data-sort="{ls}">{lat}</td><td data-sort="{cs}">{c}</td>'
+            '<td class="l">{tag}</td></tr>'.format(
+                cls="win" if is_win else "", m=esc(m),
+                frs=(fr_v if fr_v is not None else -1),
+                ds=(d_v if d_v is not None else -1),
+                ls=(lat_v if lat_v is not None else 1e15),
+                cs=(c_v if c_v is not None else 1e15),
+                fr=esc(fmt_rate(fr_v)), d=esc(fmt_score(d_v)),
+                lat=esc(fmt_latency(lat_v)), c=esc(fmt_cost(c_v)), tag=tag))
     out.append("</tbody></table>")
     return "".join(out)
 
@@ -1277,11 +1356,12 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
 {health}
 <p class="foot">Bar: floor pass-rate at or above {barp:.0f}%{db}. Generated by clawhound from a promptfoo results file.</p>
 </div>
-<script>function cwAll(o){{document.querySelectorAll('details').forEach(function(d){{d.open=o;}});}}</script>
+<script>{script}</script>
 </body></html>""".format(
         css=_REPORT_CSS, owner=owner, note=note, frontiers=frontiers,
         dual_table=dual_table, overall_table=overall_table,
-        drilldown=drilldown, health=health, barp=bar * 100, db=db)
+        drilldown=drilldown, health=health, barp=bar * 100, db=db,
+        script=_REPORT_JS)
 
 
 # ----------------------------------------------------------------------------
