@@ -45,6 +45,18 @@ def _sample_records():
     # A discriminating test that still SPLITS the models: healthy, must NOT flag.
     recs.append(rec("anthropic:opus", "raw CLV does not prove edge", "discriminating", True, 0.78, 0.02, "theory", 500))
     recs.append(rec("anthropic:haiku", "raw CLV does not prove edge", "discriminating", False, 0.30, 0.002, "theory", 3000))
+
+    # --- context-exhausted case: a record with real completion tokens spent
+    # but NO visible output - the model burned its whole budget on hidden
+    # reasoning. Distinct from a genuine wrong answer (real output, graded
+    # incorrect). Must flag this model with the ctx-exhausted marker. -------
+    recs.append({
+        "provider": {"id": "anthropic:sonnet"},
+        "testCase": {"description": "context exhaustion probe", "metadata": {"layer": "floor", "category": "math"}},
+        "success": False, "score": 0.0, "cost": 0.01, "latencyMs": 60000,  # 4000 tok / 60s = ~67 tok/s, a realistic local rate
+        "response": {"output": ""},
+        "tokenUsage": {"prompt": 90, "completion": 4000, "total": 4090},
+    })
     return recs
 
 
@@ -141,6 +153,12 @@ def _selftest():
     assert dr["theory"]["cheapest"][0] is None, dr["theory"]
     assert dr["theory"]["fastest"][0] is None, dr["theory"]
 
+    # --- context-exhausted flag: a record with real completion tokens but no
+    # visible output must be counted, and ONLY for the model that has one. ---
+    assert agg["anthropic:sonnet"]["ctx_exhausted_n"] == 1, agg["anthropic:sonnet"]
+    assert agg["anthropic:opus"]["ctx_exhausted_n"] == 0, agg["anthropic:opus"]
+    assert agg["anthropic:haiku"]["ctx_exhausted_n"] == 0, agg["anthropic:haiku"]
+
     # HTML report must carry the suite-health block, the dual routing table, and
     # BOTH frontier charts under one shared legend.
     doc = render_html(agg, layered, 1.0, 0.0, rec, "anthropic:opus", tests,
@@ -170,6 +188,9 @@ def _selftest():
     assert "Expand all" in doc and "Collapse all" in doc, "collapse-all control missing"
     assert "<details class=\"cat\"" in doc, "collapsible category detail missing"
     assert "Headline follows your <b>cheapest</b> lens" in doc, "cost-lens headline note missing"
+    # the context-exhausted model must be starred/flagged in the all-models table.
+    assert 'class="ctx-warn"' in doc, "ctx-exhausted marker missing from HTML"
+    assert "failed to finish 1 test" in doc, "ctx-exhausted tooltip note missing from HTML"
 
     # --optimize only flips which lens the HEADLINE leads with; both frontiers
     # and both routing picks always show, so the two docs share the same charts.

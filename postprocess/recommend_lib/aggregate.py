@@ -14,7 +14,7 @@ score as discriminating, and says so.
 
 from .parsing import (
     rec_model, rec_layer, rec_category, rec_test_key, rec_cost, rec_latency,
-    rec_completion_tokens, _median,
+    rec_completion_tokens, rec_context_exhausted, _median,
 )
 
 # A cache hit re-served by promptfoo (e.g. a restarted suite) carries the
@@ -43,8 +43,11 @@ def aggregate(records):
             "disc_sum": 0.0, "disc_n": 0,
             "cost_sum": 0.0, "cost_n": 0, "n": 0,
             "latencies": [],
+            "ctx_exhausted_n": 0,
         })
         a["n"] += 1
+        if rec_context_exhausted(r):
+            a["ctx_exhausted_n"] += 1
         layer = rec_layer(r)
         success = bool(r.get("success"))
         score = r.get("score")
@@ -96,6 +99,7 @@ def aggregate(records):
             "latency_s": lat_s,
             "latency_known": len(a["latencies"]) > 0,
             "n": a["n"],
+            "ctx_exhausted_n": a["ctx_exhausted_n"],
         }
     return out, layered
 

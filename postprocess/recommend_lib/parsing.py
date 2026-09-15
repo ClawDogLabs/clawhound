@@ -126,6 +126,34 @@ def rec_latency(r):
     return None
 
 
+def rec_output_empty(r):
+    """Whether a record's visible output is empty ("" or None), defensively.
+
+    Checked at response.output first (the shape seen from Ollama/local
+    providers), falling back to a top-level `output` field some provider
+    shapes use. A record can be "empty" here while still having spent real
+    completion tokens - that combination (see rec_context_exhausted) is the
+    signature of a model that burned its whole budget on hidden reasoning and
+    never got to write a visible answer, distinct from a genuine wrong answer.
+    """
+    resp = r.get("response")
+    if isinstance(resp, dict) and "output" in resp:
+        out = resp.get("output")
+        return out is None or out == ""
+    out = r.get("output")
+    return out is None or out == ""
+
+
+def rec_context_exhausted(r):
+    """True when a record burned real completion tokens but produced NO
+    visible output - the model spent its whole generation budget on hidden
+    reasoning and never got to write an answer. Distinct from a genuine wrong
+    answer (which has real output text that was just graded incorrect) and
+    from a true API error (which typically reports 0 completion tokens)."""
+    ctoks = rec_completion_tokens(r)
+    return rec_output_empty(r) and ctoks is not None and ctoks > 0
+
+
 def rec_completion_tokens(r):
     """Completion (output) token count for a record, defensively.
 

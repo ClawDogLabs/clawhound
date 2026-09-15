@@ -89,6 +89,8 @@ table.models td { text-align: right; padding: .3rem .6rem; border-bottom: 1px so
 table.models tr.win td { background: #f0faf3; }
 table.models td .win-tag { color: #1a7f37; font-weight: 700; font-size: .78rem; }
 table.models td .here-tag { color: #8250df; font-weight: 700; font-size: .78rem; }
+table.models td .ctx-warn { color: #c0281c; font-weight: 600; cursor: help;
+  border-bottom: 1px dotted #c0281c; }
 details.cat { border: 1px solid #d7dce4; border-radius: 8px; background: #fff;
   margin-bottom: .7rem; overflow: hidden; }
 details.cat > summary { font-size: 1rem; padding: .7rem .9rem; cursor: pointer;
@@ -214,12 +216,21 @@ def _model_table(agg, winner, incumbent):
                else ('<span class="here-tag">you are here</span>' if is_here else ""))
         fr_v, d_v, lat_v, c_v = (s["floor_rate"], s["disc"],
                                  s["latency_s"], s["cost_per_test"])
+        ctx_n = s.get("ctx_exhausted_n") or 0
+        if ctx_n:
+            note = ('failed to finish {n} test{ss} within the allotted context/thinking '
+                    'budget (burned the whole generation on hidden reasoning and '
+                    'returned no visible answer)').format(n=ctx_n, ss="" if ctx_n == 1 else "s")
+            name_html = ('<span class="ctx-warn" title="{note}">★ {display_m}'
+                        '</span>').format(note=esc(note), display_m=esc(fmt_model_name(m)))
+        else:
+            name_html = esc(fmt_model_name(m))
         out.append(
             '<tr class="{cls}" data-model="{m}"><td class="l">{display_m}</td>'
             '<td data-sort="{frs}">{fr}</td><td data-sort="{ds}">{d}</td>'
             '<td data-sort="{ls}">{lat}</td><td data-sort="{cs}">{c}</td>'
             '<td class="l">{tag}</td></tr>'.format(
-                cls="win" if is_win else "", m=esc(m), display_m=esc(fmt_model_name(m)),
+                cls="win" if is_win else "", m=esc(m), display_m=name_html,
                 frs=(fr_v if fr_v is not None else -1),
                 ds=(d_v if d_v is not None else -1),
                 ls=(lat_v if lat_v is not None else 1e15),
