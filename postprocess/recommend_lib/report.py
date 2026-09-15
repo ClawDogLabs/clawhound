@@ -588,7 +588,13 @@ def _run_cost_html(records, judge_id=None):
                'discounts, and promptfoo does not meter grading itself. Actual billed '
                'cost is usually lower, and provider usage dashboards lag (Anthropic '
                'more than most), so confirm real spend in each provider\'s usage '
-               'console. Local models are free.</p>')
+               'console. Local models are free. The grading estimate assumes ONE '
+               'constant judge for the whole file (read from the results file\'s '
+               'stored config) - if this file was assembled by merging multiple runs '
+               'made under different judges (e.g. the judge was changed partway '
+               'through a suite\'s lifetime and old + new records were combined), '
+               'the estimate silently uses whichever judge the file currently '
+               'reports and can misprice the other records\' grading tokens.</p>')
     return "".join(out)
 
 
