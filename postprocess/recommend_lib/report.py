@@ -221,7 +221,7 @@ def _model_table(agg, winner, incumbent):
             note = ('failed to finish {n} test{ss} within the allotted context/thinking '
                     'budget (burned the whole generation on hidden reasoning and '
                     'returned no visible answer)').format(n=ctx_n, ss="" if ctx_n == 1 else "s")
-            name_html = ('<span class="ctx-warn" title="{note}">★ {display_m}'
+            name_html = ('<span class="ctx-warn" title="{note}">* {display_m}'
                         '</span>').format(note=esc(note), display_m=esc(fmt_model_name(m)))
         else:
             name_html = esc(fmt_model_name(m))
