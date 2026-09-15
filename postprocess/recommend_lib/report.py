@@ -89,8 +89,7 @@ table.models td { text-align: right; padding: .3rem .6rem; border-bottom: 1px so
 table.models tr.win td { background: #f0faf3; }
 table.models td .win-tag { color: #1a7f37; font-weight: 700; font-size: .78rem; }
 table.models td .here-tag { color: #8250df; font-weight: 700; font-size: .78rem; }
-table.models td .ctx-warn { color: #c0281c; font-weight: 600; cursor: help;
-  border-bottom: 1px dotted #c0281c; }
+table.models td .ctx-warn { color: #b91c1c; font-weight: 600; cursor: help; }
 details.cat { border: 1px solid #d7dce4; border-radius: 8px; background: #fff;
   margin-bottom: .7rem; overflow: hidden; }
 details.cat > summary { font-size: 1rem; padding: .7rem .9rem; cursor: pointer;
@@ -221,7 +220,7 @@ def _model_table(agg, winner, incumbent):
             note = ('failed to finish {n} test{ss} within the allotted context/thinking '
                     'budget (burned the whole generation on hidden reasoning and '
                     'returned no visible answer)').format(n=ctx_n, ss="" if ctx_n == 1 else "s")
-            name_html = ('<span class="ctx-warn" title="{note}">* {display_m}'
+            name_html = ('{display_m}<span class="ctx-warn" title="{note}"> *'
                         '</span>').format(note=esc(note), display_m=esc(fmt_model_name(m)))
         else:
             name_html = esc(fmt_model_name(m))
