@@ -193,6 +193,15 @@ of the models under test (so it cannot favor itself), with `config: { max_tokens
 budget thinking. A mid-tier judge (not the priciest model) keeps cost down, since
 grading is usually the bulk of a run's spend.
 
+Prefer a judge OUTSIDE the vendor family under test, not just outside the exact
+model list. Self-preference bias is measured, not theoretical: judges rate same-family
+output more favorably even when a different-family answer is equal or better. If the
+field is all Claude models, judge with Gemini or GPT rather than a different Claude
+tier; if the field mixes vendors, pick whichever vendor is NOT represented, or the one
+least represented. A same-family judge (e.g. Sonnet judging Haiku vs Opus) is the most
+common way this bias slips in unnoticed, because "it's not one of the models under
+test" feels like enough of a check when it is not.
+
 ## Assertion gotchas (from real runs)
 
 - **Quote every `g-eval` and `llm-rubric` criterion string.** A `": "` inside an
