@@ -80,6 +80,13 @@ table.routing tr.none td { color: #b35900; }
 .lens-note { color: #667; font-size: .84rem; margin: .2rem 0 .3rem; }
 .disagree-note { color: #8a6d00; font-size: .88rem; margin: .35rem 0; }
 .agree-note { color: #4a8a5a; font-size: .84rem; margin: .35rem 0; }
+table.legend-table { border-collapse: collapse; font-size: .83rem; color: #4a5568; width: 100%;
+  background: #f3f5f8; border: 1px solid #e2e6ec; border-radius: 6px; margin: .4rem 0 .9rem;
+  overflow: hidden; }
+table.legend-table td { padding: .4rem .75rem; border-top: 1px solid #e2e6ec; line-height: 1.5;
+  vertical-align: top; }
+table.legend-table tr:first-child td { border-top: none; }
+table.legend-table td:first-child { white-space: nowrap; width: 1%; color: #2a3140; }
 table.models { border-collapse: collapse; font-size: .86rem; width: 100%; margin: .2rem 0; }
 table.models th { text-align: right; padding: .3rem .6rem; border-bottom: 1px solid #dde2ea;
   color: #667; font-weight: 600; white-space: nowrap; }
@@ -662,7 +669,12 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
 <h2>Cost and latency vs quality</h2>
 {frontiers}
 <h2>All models at a glance</h2>
-<p style="font-size:.83rem;color:#4a5568;background:#f3f5f8;border:1px solid #e2e6ec;border-radius:6px;padding:.55rem .75rem;margin:.4rem 0 .9rem;line-height:1.55"><b>floor</b>: must-pass correctness and guardrails, the routing gate (you want 100%). &nbsp; <b>disc</b>: discriminating, the graded hard-reasoning score, 0 to 1, used to rank models. &nbsp; <b>latency</b>: median response time. &nbsp; <b>cost /100</b>: API cost per 100 tests <b>measured on this suite</b> - it reflects each model's own verbosity here, not just its list price, so it moves if your real tasks are longer (per-test is fractions of a cent; the run-cost panel shows real totals).</p>
+<table class="legend-table"><tbody>
+<tr><td class="l"><b>floor</b></td><td class="l">must-pass correctness and guardrails, the routing gate (you want 100%).</td></tr>
+<tr><td class="l"><b>disc</b></td><td class="l">discriminating, the graded hard-reasoning score, 0 to 1, used to rank models.</td></tr>
+<tr><td class="l"><b>latency</b></td><td class="l">median response time.</td></tr>
+<tr><td class="l"><b>cost /100</b></td><td class="l">API cost per 100 tests <b>measured on this suite</b> - it reflects each model's own verbosity here, not just its list price, so it moves if your real tasks are longer (per-test is fractions of a cent; the run-cost panel shows real totals).</td></tr>
+</tbody></table>
 {overall_table}
 {dual_table}
 {drilldown}
