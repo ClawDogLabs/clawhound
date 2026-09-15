@@ -70,6 +70,13 @@ def fmt_model_name(provider_id):
     name = re.sub(r'([a-z]{2,})(\d)', r'\1 \2', name)  # Split only multi-letter + digits (llama3 -> llama 3)
     name = re.sub(r'(\d)([a-z])', lambda m: m.group(1) + m.group(2) if m.group(2) in 'bm' else m.group(1) + ' ' + m.group(2), name)
     words = name.split()
+    # Drop everything after the parameter-size token (e.g. "12b", "27b") - that's
+    # the model's identity; trailing quant/tuning tags (Q4_K_M, it, GGUF, ...) are
+    # noise for a routing table. "gemma4:12b-it-q4_K_M" -> stop at "12b".
+    for i, w in enumerate(words):
+        if re.match(r'^\d+b$', w, re.IGNORECASE):
+            words = words[:i + 1]
+            break
     formatted = []
     acronyms = {"gpt": "GPT", "llm": "LLM", "deepseek": "DeepSeek"}
     for w in words:

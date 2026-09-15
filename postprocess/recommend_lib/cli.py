@@ -13,7 +13,7 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
     # rec_context_exhausted) - a distinct failure mode from a graded wrong
     # answer, worth flagging right in the name column.
     display_names = {m: (fmt_model_name(m)
-                         + (" *" if (s.get("ctx_exhausted_n") or 0) else ""))
+                         + ("*" if (s.get("ctx_exhausted_n") or 0) else ""))
                      for m, s in rows}
     name_w = max([len("model")] + [len(display_names[m]) for m, _ in rows]) + 2
     # Always show cost/test when known; the active metric gets its own column.
