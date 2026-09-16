@@ -90,6 +90,18 @@ def main():
                          "point at the best remainder's coordinates (default 8; 0 "
                          "disables grouping)")
     ap.add_argument("--out", default="report.html", help="HTML report path")
+    ap.add_argument("--latency-ceiling", type=float, default=90.0,
+                    help="practical viability ceiling in seconds (default 90.0). A "
+                         "model whose median latency EXCEEDS this is never the "
+                         "recommended pick and is marked (daggered) with a warning "
+                         "in every table, even when it would otherwise be cheapest or "
+                         "clear the floor bar - correct-but-too-slow is a real, "
+                         "distinct verdict from wrong or expensive. Its floor and disc "
+                         "scores are still shown and still count; only recommendation "
+                         "eligibility is gated. Pass 0 to disable the ceiling entirely "
+                         "(see every model's raw numbers with no latency judgment, "
+                         "e.g. to gauge how a model performs before judging whether "
+                         "your current hardware can actually run it in practice).")
     args = ap.parse_args()
 
     if args.selftest:
@@ -117,16 +129,18 @@ def main():
     tests = aggregate_tests(records)
     cat_aggs, categorized = aggregate_by_category(records)
     labels = load_category_labels(args.results)
-    rec = recommend(agg, args.bar, args.disc_bar, args.optimize)
-    print_report(agg, layered, args.bar, args.disc_bar, rec, args.incumbent, args.optimize)
-    print_routing(cat_aggs, categorized, args.bar, args.disc_bar, args.optimize)
+    rec = recommend(agg, args.bar, args.disc_bar, args.optimize, args.latency_ceiling)
+    print_report(agg, layered, args.bar, args.disc_bar, rec, args.incumbent, args.optimize,
+                latency_ceiling=args.latency_ceiling)
+    print_routing(cat_aggs, categorized, args.bar, args.disc_bar, args.optimize,
+                  latency_ceiling=args.latency_ceiling)
     print_health(tests, layered)
 
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(render_html(agg, layered, args.bar, args.disc_bar, rec,
                             args.incumbent, tests, cat_aggs, categorized, args.optimize,
                             records=records, labels=labels, judge_id=judge_id,
-                            top_n=args.top_n))
+                            top_n=args.top_n, latency_ceiling=args.latency_ceiling))
     print("\nHTML report: " + args.out)
 
 

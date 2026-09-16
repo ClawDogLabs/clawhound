@@ -2,7 +2,10 @@
 shaped records that exercise the suite-health block. Run with `--selftest`."""
 
 from .aggregate import aggregate, aggregate_tests, aggregate_by_category, suite_health
-from .routing import recommend, route_by_category, owner_routing, everyday_pick, dual_routing
+from .routing import (
+    recommend, route_by_category, owner_routing, everyday_pick, dual_routing,
+    exceeds_latency_ceiling,
+)
 from .charts import _frontier_ylo
 from .report import render_html
 from .cli import print_report, print_routing, print_health
@@ -106,6 +109,16 @@ def _sample_records():
         "response": {"output": "a real, test-specific answer"},
         "tokenUsage": {"prompt": 0, "completion": 0, "cached": 616, "total": 616},
     })
+
+    # --- latency ceiling case: a model that is genuinely CORRECT (clears the
+    # floor bar) and genuinely FREE (cheaper than every other model here), but
+    # takes 95s per call - a real, distinct verdict from wrong or expensive.
+    # Own isolated category ("hardware") and model id so it never perturbs the
+    # math/frontend/theory/impossible assertions elsewhere; it competes for
+    # the OVERALL cost-mode recommendation though (nothing beats free), which
+    # is exactly what proves the ceiling gate does something: without a
+    # ceiling this model SHOULD win on cost; with one, it must not. ----------
+    recs.append(rec("anthropic:slowmodel", "isolated floor probe", "floor", True, 1.0, 0.0, "hardware", 95000))
     return recs
 
 
@@ -205,10 +218,16 @@ def _selftest():
     assert owner_route["frontend"]["reason"] == "cheapest that clears the bar", owner_route["frontend"]
     assert owner_route["theory"]["model"] is None, owner_route["theory"]
     assert owner_route["theory"]["strongest"] == "anthropic:opus", owner_route["theory"]
-    # cost mode: math->opus, frontend->haiku (1 each); tie broken by cheaper
-    # overall -> haiku is the everyday pick.
+    # cost mode with NO ceiling: math->opus, frontend->haiku, hardware->the
+    # free-but-95s slowmodel (it's alone in its category, so it wins outright)
+    # - a three-way tie at one category each, broken by cheaper overall. Free
+    # beats haiku's $0.002, so the tiebreak picks the 95s model as "everyday",
+    # which is exactly the wrong-headline problem the latency ceiling exists
+    # to fix (see the ceiling assertions below) - without a ceiling, tie-break
+    # logic has no way to know 95s is impractical, so this IS correct given
+    # the inputs, not a fixture bug.
     everyday = everyday_pick(owner_route, "cost", agg)
-    assert everyday == "anthropic:haiku", everyday
+    assert everyday == "anthropic:slowmodel", everyday
     # the zoomed y-axis lower bound never starts above 80.
     assert _frontier_ylo(agg) <= 80, _frontier_ylo(agg)
 
@@ -279,4 +298,33 @@ def _selftest():
         "both frontiers must render regardless of --optimize"
     assert "Per-service routing" in doc_lat, "dual routing must render in latency mode"
     assert "Headline follows your <b>fastest</b> lens" in doc_lat, "latency-lens headline note missing"
+
+    # --- latency ceiling: a correct, genuinely free model that takes 95s must
+    # NOT win the overall recommendation once a 90s ceiling is set, even though
+    # nothing beats free on cost - correct-but-too-slow is excluded from being
+    # RECOMMENDED, but its floor/disc numbers stay real and visible. ----------
+    assert exceeds_latency_ceiling(agg["anthropic:slowmodel"], 90) is True, \
+        "95s model must exceed a 90s ceiling"
+    assert exceeds_latency_ceiling(agg["anthropic:slowmodel"], None) is False, \
+        "no ceiling set (None) must never flag anything as exceeding it"
+    assert exceeds_latency_ceiling(agg["anthropic:slowmodel"], 0) is False, \
+        "ceiling of 0 means disabled, same as None"
+    # without a ceiling, the free 95s model DOES win overall cost-mode - proves
+    # the fixture is actually cheapest, so the exclusion below is the ceiling
+    # doing something, not just losing on cost anyway.
+    rec_no_ceiling = recommend(agg, 1.0, 0.0, "cost", latency_ceiling=None)
+    assert rec_no_ceiling == "anthropic:slowmodel", rec_no_ceiling
+    # with a 90s ceiling, it must be excluded and a real (faster) clearer wins.
+    rec_ceiling = recommend(agg, 1.0, 0.0, "cost", latency_ceiling=90)
+    assert rec_ceiling != "anthropic:slowmodel", rec_ceiling
+    assert rec_ceiling is not None, "a faster clearer must still be found"
+
+    # the HTML report must warn (dagger-marker) the over-ceiling model without
+    # hiding its floor/disc numbers, and must NOT recommend it as "run this".
+    doc_ceiling = render_html(agg, layered, 1.0, 0.0, rec_ceiling, "anthropic:opus",
+                              tests, cat_aggs, categorized, records=records,
+                              latency_ceiling=90)
+    assert "exceeds your 90s latency ceiling" in doc_ceiling, \
+        "latency-ceiling warning missing from HTML"
+    assert "100%" in doc_ceiling, "slow model's real floor score must still be shown"
     print("\nselftest: OK")

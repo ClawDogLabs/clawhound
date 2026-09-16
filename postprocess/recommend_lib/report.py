@@ -8,7 +8,7 @@ import html
 from .formatting import fmt_rate, fmt_score, fmt_cost, fmt_cost_u, fmt_latency, fmt_model_name
 from .routing import (
     category_label, strongest_model, dual_routing, owner_routing, everyday_pick,
-    category_floor_failures, recommend,
+    category_floor_failures, recommend, exceeds_latency_ceiling,
 )
 from .aggregate import suite_health
 from .charts import _model_colors, _frontier_ylo, _svg_frontier_plot, _frontier_legend_html
@@ -218,7 +218,7 @@ function cwAll(o){document.querySelectorAll('details').forEach(function(d){d.ope
 """
 
 
-def _model_table(agg, winner, incumbent):
+def _model_table(agg, winner, incumbent, latency_ceiling=None):
     """Compact per-model table: floor pass-rate, discriminating score, latency,
     cost, with the winner (recommended for this scope) and incumbent marked."""
     esc = html.escape
@@ -243,11 +243,13 @@ def _model_table(agg, winner, incumbent):
                                  s["latency_s"], s["cost_per_test"])
         ctx_n = s.get("ctx_exhausted_n") or 0
         refused_n = s.get("refused_n") or 0
-        # Two distinct no-visible-answer failure modes, never conflated: a
+        too_slow = exceeds_latency_ceiling(s, latency_ceiling)
+        # Three distinct no-good-answer-in-practice modes, never conflated: a
         # budget problem (ctx_n, burned the whole generation on hidden
-        # reasoning) is a different fix for the suite author than a provider
-        # safety/content-filter block (refused_n), which is not a budget or
-        # correctness problem at all.
+        # reasoning), a provider safety/content-filter block (refused_n, not
+        # a budget or correctness problem at all), and a model that is
+        # CORRECT but too slow to run in practice (too_slow) - a real,
+        # distinct verdict, not a data-quality problem.
         notes = []
         if ctx_n:
             notes.append(('failed to finish {n} test{ss} within the allotted context/thinking '
@@ -257,8 +259,13 @@ def _model_table(agg, winner, incumbent):
             notes.append(('{n} test{ss} blocked by the provider\'s safety/content filter '
                     '(no visible answer, not a wrong answer and not a budget problem)'
                     ).format(n=refused_n, ss="" if refused_n == 1 else "s"))
+        if too_slow:
+            notes.append(('median {lat} exceeds your {ceil:.0f}s latency ceiling - correct, '
+                    'floor and disc scores are real, but not fast enough to run in '
+                    'practice on your current setup').format(
+                        lat=fmt_latency(lat_v), ceil=latency_ceiling))
         if notes:
-            marker = ("*" if ctx_n else "") + ("†" if refused_n else "")
+            marker = ("*" if ctx_n else "") + ("†" if refused_n else "") + ("‡" if too_slow else "")
             name_html = ('<span class="ctx-warn" title="{note}">{display_m}{marker}'
                         '</span>').format(note=esc("; ".join(notes)),
                                           display_m=esc(fmt_model_name(m)), marker=marker)
@@ -373,14 +380,14 @@ def _owner_summary_html(lead_route, route_cost, route_lat, everyday, labels, opt
     return "".join(parts)
 
 
-def _dual_routing_html(cat_aggs, bar, disc_bar, labels):
+def _dual_routing_html(cat_aggs, bar, disc_bar, labels, latency_ceiling=None):
     """Per-service dual routing table: for each category the CHEAPEST model that
     clears the bar (with its cost/test) and the FASTEST (with its median
     latency). When the two picks are the SAME model the cell collapses across
     both columns and notes "cheapest and fastest". When no model clears, the row
     says so and names the closest (strongest) model."""
     esc = html.escape
-    dr = dual_routing(cat_aggs, bar, disc_bar)
+    dr = dual_routing(cat_aggs, bar, disc_bar, latency_ceiling)
     parts = ['<h2>Per-service routing</h2>',
              '<table class="routing"><thead><tr>'
              '<th class="l">service</th><th class="l">cheapest</th>'
@@ -427,7 +434,7 @@ def _dual_routing_html(cat_aggs, bar, disc_bar, labels):
     return "".join(parts)
 
 
-def _drilldown_html(owner_route, cat_aggs, cat_fails, labels, incumbent):
+def _drilldown_html(owner_route, cat_aggs, cat_fails, labels, incumbent, latency_ceiling=None):
     """Per-category <details>, closed by default. Summary = the owner line;
     expansion = the per-model table for that category plus the DEDUPED floor
     failures within it."""
@@ -452,7 +459,7 @@ def _drilldown_html(owner_route, cat_aggs, cat_fails, labels, incumbent):
             none_attr = ''
         parts.append('<details class="cat"' + none_attr + '><summary>' + summ + '</summary>')
         parts.append('<div class="cat-body">')
-        parts.append(_model_table(cat_aggs[c], i["model"], incumbent))
+        parts.append(_model_table(cat_aggs[c], i["model"], incumbent, latency_ceiling))
         fails = cat_fails.get(c, [])
         if fails:
             parts.append('<div class="fail-head">Floor tests failed here '
@@ -644,14 +651,14 @@ def _run_cost_html(records, judge_id=None):
 
 def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None,
                 cat_aggs=None, categorized=False, optimize="cost", records=None,
-                labels=None, judge_id=None, top_n=8):
+                labels=None, judge_id=None, top_n=8, latency_ceiling=None):
     esc = html.escape
     labels = labels or {}
     cat_aggs = cat_aggs if cat_aggs is not None else {}
     # Both routing lenses are always computed. The headline leads with --optimize;
     # the frontier charts and the per-service table always show both.
-    route_cost = owner_routing(cat_aggs, bar, disc_bar, "cost")
-    route_lat = owner_routing(cat_aggs, bar, disc_bar, "latency")
+    route_cost = owner_routing(cat_aggs, bar, disc_bar, "cost", latency_ceiling)
+    route_lat = owner_routing(cat_aggs, bar, disc_bar, "latency", latency_ceiling)
     lead_route = route_lat if optimize == "latency" else route_cost
     everyday = everyday_pick(lead_route, optimize, agg)
     note = ("" if layered else
@@ -677,8 +684,8 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
     # the same zoomed y-axis floor. One shared legend serves both.
     colors = _model_colors(agg)
     ylo = _frontier_ylo(agg)
-    rec_cost = recommend(agg, bar, disc_bar, "cost")
-    rec_lat = recommend(agg, bar, disc_bar, "latency")
+    rec_cost = recommend(agg, bar, disc_bar, "cost", latency_ceiling)
+    rec_lat = recommend(agg, bar, disc_bar, "latency", latency_ceiling)
     legend = _frontier_legend_html(agg, colors, rec_cost, rec_lat, incumbent, top_n)
     svg_cost = _svg_frontier_plot(agg, colors, "cost", rec_cost, incumbent, ylo, top_n)
     svg_lat = _svg_frontier_plot(agg, colors, "latency", rec_lat, incumbent, ylo, top_n)
@@ -690,11 +697,11 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
                  + '</div>'
                  + legend)
 
-    overall_table = _model_table(agg, rec_cost, incumbent)
+    overall_table = _model_table(agg, rec_cost, incumbent, latency_ceiling)
     if categorized and cat_aggs:
-        dual_table = _dual_routing_html(cat_aggs, bar, disc_bar, labels)
+        dual_table = _dual_routing_html(cat_aggs, bar, disc_bar, labels, latency_ceiling)
         cat_fails = category_floor_failures(records or [])
-        drilldown = _drilldown_html(lead_route, cat_aggs, cat_fails, labels, incumbent)
+        drilldown = _drilldown_html(lead_route, cat_aggs, cat_fails, labels, incumbent, latency_ceiling)
     else:
         dual_table = ""
         drilldown = ""

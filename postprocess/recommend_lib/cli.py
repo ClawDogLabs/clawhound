@@ -1,26 +1,31 @@
 """Plain-text report printers (the console output alongside the HTML report)."""
 
 from .formatting import fmt_rate, fmt_score, fmt_cost, fmt_latency, fmt_model_name
-from .routing import _metric_field, optimize_sort_key, route_by_category
+from .routing import _metric_field, optimize_sort_key, route_by_category, exceeds_latency_ceiling
 from .aggregate import suite_health
 
 
-def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize="cost"):
+def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize="cost",
+                 latency_ceiling=None):
     field = _metric_field(optimize)
     rows = sorted(agg.items(), key=optimize_sort_key(optimize))
     # Suffix a marker on any model that returned no visible answer at least
     # once, distinguishing WHY: "*" burned its whole budget on hidden
     # reasoning (rec_context_exhausted); "†" was blocked by a provider
-    # safety/content filter (rec_refused). Both are distinct from a graded
-    # wrong answer (which has real output text), worth flagging right in the
-    # name column - conflating the two mislabels a policy refusal as a
-    # budget problem, which is a different fix for the suite author.
+    # safety/content filter (rec_refused); "‡" cleared the correctness bar
+    # but is too slow to actually run (exceeds_latency_ceiling) - a real,
+    # distinct verdict from wrong or too expensive: this model is CORRECT and
+    # would be free/cheap, but nobody is waiting this long for an answer on
+    # your current hardware. Conflating the three mislabels the actual fix a
+    # suite author or reader needs to make.
     def _marker(s):
         mk = ""
         if s.get("ctx_exhausted_n") or 0:
             mk += "*"
         if s.get("refused_n") or 0:
             mk += "†"
+        if exceeds_latency_ceiling(s, latency_ceiling):
+            mk += "‡"
         return mk
     display_names = {m: fmt_model_name(m) + _marker(s) for m, s in rows}
     name_w = max([len("model")] + [len(display_names[m]) for m, _ in rows]) + 2
@@ -31,6 +36,7 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
     print("-" * len(header))
     ctx_warned = []
     refused_warned = []
+    slow_warned = []
     for m, s in rows:
         cpt = s["cost_per_test"]
         mark = ""
@@ -47,6 +53,8 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
         refused_n = s.get("refused_n") or 0
         if refused_n:
             refused_warned.append((fmt_model_name(m), refused_n))
+        if exceeds_latency_ceiling(s, latency_ceiling):
+            slow_warned.append((fmt_model_name(m), s.get("latency_s")))
     print()
     if ctx_warned:
         for name, n in ctx_warned:
@@ -60,23 +68,34 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
                   "(no visible answer, not a wrong answer and not a budget problem)."
                   .format(name, n, "" if n == 1 else "s"))
         print()
+    if slow_warned:
+        for name, lat in slow_warned:
+            print("‡ {}: median {} exceeds your {:.0f}s latency ceiling - floor and disc "
+                  "scores above are still real, but this is not fast enough to run in "
+                  "practice on your current setup; treat it as exploratory only, or as a "
+                  "case for a faster inference stack."
+                  .format(name, fmt_latency(lat), latency_ceiling))
+        print()
     if not layered:
         print("Note: tests were not tagged by layer, so floor = overall pass-rate "
               "and disc = mean score across all tests.")
     metric_word = "fastest by median latency" if optimize == "latency" else "lowest cost"
+    ceiling_note = (", latency <= {:.0f}s".format(latency_ceiling)
+                    if latency_ceiling and latency_ceiling > 0 else "")
     if rec_model_id:
         s = agg[rec_model_id]
         rec_display = display_names.get(rec_model_id, fmt_model_name(rec_model_id))
-        print("Run: {}. Clears the bar (floor {} >= {:.0f}%){} at the {}."
+        print("Run: {}. Clears the bar (floor {} >= {:.0f}%){}{} at the {}."
               .format(rec_display, fmt_rate(s["floor_rate"]), bar * 100,
                       "" if disc_bar <= 0 else ", disc {} >= {:.2f}".format(
                           fmt_score(s["disc"]), disc_bar),
-                      metric_word))
+                      ceiling_note, metric_word))
     else:
-        print("No model clears the bar (floor pass-rate >= {:.0f}%{}). "
+        print("No model clears the bar (floor pass-rate >= {:.0f}%{}{}). "
               "Raise coverage, lower the bar, or add a stronger model."
               .format(bar * 100,
-                      "" if disc_bar <= 0 else ", disc >= {:.2f}".format(disc_bar)))
+                      "" if disc_bar <= 0 else ", disc >= {:.2f}".format(disc_bar),
+                      ceiling_note))
     if incumbent and rec_model_id and incumbent in agg and incumbent != rec_model_id:
         inc = agg[incumbent].get(field)
         rec = agg[rec_model_id].get(field)
@@ -112,7 +131,7 @@ def print_health(tests, layered):
               'gives no ranking signal. Harden or retire it.'.format(test))
 
 
-def print_routing(cat_aggs, categorized, bar, disc_bar, optimize="cost"):
+def print_routing(cat_aggs, categorized, bar, disc_bar, optimize="cost", latency_ceiling=None):
     print()
     title = "Per-category routing"
     print(title)
@@ -121,7 +140,7 @@ def print_routing(cat_aggs, categorized, bar, disc_bar, optimize="cost"):
         print("No test carried a category, so per-category routing is absent. "
               "Tag tests with metadata.category to enable it.")
         return
-    routing = route_by_category(cat_aggs, bar, disc_bar, optimize)
+    routing = route_by_category(cat_aggs, bar, disc_bar, optimize, latency_ceiling)
     cats = sorted(routing)
     cat_w = max([len("category")] + [len(c) for c in cats]) + 2
     model_display = {m: fmt_model_name(m) for m, _, _ in routing.values() if m}

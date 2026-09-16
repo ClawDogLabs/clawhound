@@ -30,11 +30,27 @@ def optimize_sort_key(optimize):
     return key
 
 
-def recommend(agg, bar, disc_bar, optimize="cost"):
+def exceeds_latency_ceiling(s, latency_ceiling):
+    """True when a model's median latency is KNOWN and over the ceiling.
+
+    A ceiling is a practical-viability gate, not a data-quality one: "correct
+    but nobody will wait N minutes for an answer" is a real, distinct verdict
+    from "wrong" or "too expensive". Unknown latency (None) never counts as
+    exceeding it - absence of data is not evidence of slowness. latency_ceiling
+    of None or <=0 means no ceiling is set (disabled)."""
+    if not latency_ceiling or latency_ceiling <= 0:
+        return False
+    lat = s.get("latency_s")
+    return lat is not None and lat > latency_ceiling
+
+
+def recommend(agg, bar, disc_bar, optimize="cost", latency_ceiling=None):
     def clears(s):
         if s["floor_rate"] is None or s["floor_rate"] < bar:
             return False
         if disc_bar > 0 and (s["disc"] is None or s["disc"] < disc_bar):
+            return False
+        if exceeds_latency_ceiling(s, latency_ceiling):
             return False
         return True
 
@@ -57,7 +73,7 @@ def recommend(agg, bar, disc_bar, optimize="cost"):
 # model routing.
 # ----------------------------------------------------------------------------
 
-def route_by_category(cat_aggs, bar, disc_bar, optimize="cost"):
+def route_by_category(cat_aggs, bar, disc_bar, optimize="cost", latency_ceiling=None):
     """category -> (recommended model or None, cost_per_test or None, latency_s or None).
 
     Reuses recommend() so each category uses the same bar / disc_bar gate and
@@ -68,24 +84,26 @@ def route_by_category(cat_aggs, bar, disc_bar, optimize="cost"):
     """
     routing = {}
     for cat, agg in cat_aggs.items():
-        rec = recommend(agg, bar, disc_bar, optimize)
+        rec = recommend(agg, bar, disc_bar, optimize, latency_ceiling)
         cpt = agg[rec]["cost_per_test"] if (rec and rec in agg) else None
         lat_s = agg[rec]["latency_s"] if (rec and rec in agg) else None
         routing[cat] = (rec, cpt, lat_s)
     return routing
 
 
-def dual_routing(cat_aggs, bar, disc_bar):
+def dual_routing(cat_aggs, bar, disc_bar, latency_ceiling=None):
     """{category: {"cheapest": (model, cpt, lat_s), "fastest": (model, cpt, lat_s)}}.
 
     Runs the SAME route selection once per metric. The set of models that CLEAR
     the bar is identical for both lenses (the gate is the floor pass-rate, which
     is metric independent); only the tiebreak differs. So cheapest and fastest
     can name DIFFERENT models when more than one model clears within a category,
-    and always name the same model when exactly one clears (or none).
+    and always name the same model when exactly one clears (or none). A latency
+    ceiling removes over-ceiling models from BOTH lenses identically - fastest
+    being over-ceiling would defeat the point of the fastest lens.
     """
-    cost = route_by_category(cat_aggs, bar, disc_bar, "cost")
-    lat = route_by_category(cat_aggs, bar, disc_bar, "latency")
+    cost = route_by_category(cat_aggs, bar, disc_bar, "cost", latency_ceiling)
+    lat = route_by_category(cat_aggs, bar, disc_bar, "latency", latency_ceiling)
     return {c: {"cheapest": cost[c], "fastest": lat[c]} for c in cat_aggs}
 
 
@@ -146,7 +164,7 @@ def strongest_model(agg):
     return best[1] if best else None
 
 
-def category_route_info(cat, agg, bar, disc_bar, optimize):
+def category_route_info(cat, agg, bar, disc_bar, optimize, latency_ceiling=None):
     """Everything the owner line for one category needs.
 
     Returns dict: model (recommended, or None), n_clearers, strongest (closest
@@ -171,10 +189,12 @@ def category_route_info(cat, agg, bar, disc_bar, optimize):
             return False
         if disc_bar > 0 and (s["disc"] is None or s["disc"] < disc_bar):
             return False
+        if exceeds_latency_ceiling(s, latency_ceiling):
+            return False
         return True
 
     clearers = [m for m, s in agg.items() if clears(s)]
-    model = recommend(agg, bar, disc_bar, optimize)
+    model = recommend(agg, bar, disc_bar, optimize, latency_ceiling)
     cpt = agg[model]["cost_per_test"] if (model and model in agg) else None
     lat_s = agg[model]["latency_s"] if (model and model in agg) else None
     if model is None:
@@ -198,9 +218,9 @@ def category_route_info(cat, agg, bar, disc_bar, optimize):
             "reason": reason, "cpt": cpt, "lat_s": lat_s, "no_floor_tests": False}
 
 
-def owner_routing(cat_aggs, bar, disc_bar, optimize="cost"):
+def owner_routing(cat_aggs, bar, disc_bar, optimize="cost", latency_ceiling=None):
     """category -> category_route_info, for every category, sorted-friendly."""
-    return {cat: category_route_info(cat, agg, bar, disc_bar, optimize)
+    return {cat: category_route_info(cat, agg, bar, disc_bar, optimize, latency_ceiling)
             for cat, agg in cat_aggs.items()}
 
 
