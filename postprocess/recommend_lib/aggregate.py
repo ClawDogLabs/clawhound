@@ -14,7 +14,8 @@ score as discriminating, and says so.
 
 from .parsing import (
     rec_model, rec_layer, rec_category, rec_test_key, rec_cost, rec_latency,
-    rec_completion_tokens, rec_context_exhausted, _median,
+    rec_completion_tokens, rec_context_exhausted, rec_refused,
+    rec_cost_unreliable, _median,
 )
 
 # A cache hit re-served by promptfoo (e.g. a restarted suite) carries the
@@ -27,6 +28,37 @@ from .parsing import (
 # ceiling is excluded from latency stats (score, cost, and pass/fail are still
 # counted normally; only the LATENCY sample is dropped for that record).
 _MAX_PLAUSIBLE_TOKENS_PER_SEC = 200
+
+# A second cache-hit signature the tok/s check above cannot see: some cache
+# replays zero out the completion-token count along with skipping generation,
+# so ctoks == 0 and the tok/s ratio computes to 0 - comfortably under the
+# ceiling, so the tok/s check alone WRONGLY keeps it. No genuine network round
+# trip to any provider (cloud or local) completes in single-digit
+# milliseconds regardless of how few tokens come back, so an absolute floor
+# catches this shape independent of token count.
+_MIN_PLAUSIBLE_LATENCY_MS = 50
+
+
+def _is_cache_hit(lat, ctoks):
+    """True when a record's latency/token-count combination is the signature
+    of a promptfoo cache replay, not a real inference call: either an
+    implausible tokens/sec ratio (many tokens delivered near-instantly), or
+    latency below any real network+inference round trip (catches a replay
+    that also zeroed the token count, which the tok/s check alone cannot see
+    - 0 tokens over any latency computes to 0 tok/s, under the ceiling). A
+    cache hit's cost (typically 0, no new spend on the replay) and latency
+    (near-zero, no real generation happened) are both artifacts of the
+    replay, not signal about the model's real per-call price or speed -
+    excluded from both stats by every caller of this function. Returns False
+    when latency is unknown (nothing to judge cache-hit-ness from; trust
+    whatever other fields are present rather than guessing).
+    """
+    if lat is None:
+        return False
+    if lat < _MIN_PLAUSIBLE_LATENCY_MS:
+        return True
+    return (lat > 0 and ctoks is not None and ctoks > 0
+            and (ctoks / (lat / 1000.0)) > _MAX_PLAUSIBLE_TOKENS_PER_SEC)
 
 
 # ----------------------------------------------------------------------------
@@ -44,10 +76,13 @@ def aggregate(records):
             "cost_sum": 0.0, "cost_n": 0, "n": 0,
             "latencies": [],
             "ctx_exhausted_n": 0,
+            "refused_n": 0,
         })
         a["n"] += 1
         if rec_context_exhausted(r):
             a["ctx_exhausted_n"] += 1
+        if rec_refused(r):
+            a["refused_n"] += 1
         layer = rec_layer(r)
         success = bool(r.get("success"))
         score = r.get("score")
@@ -66,20 +101,20 @@ def aggregate(records):
             if isinstance(score, (int, float)):
                 a["disc_sum"] += float(score)
                 a["disc_n"] += 1
+        lat = rec_latency(r)
+        ctoks = rec_completion_tokens(r)
+        cache_hit = _is_cache_hit(lat, ctoks)
         c = rec_cost(r)
-        if c is not None:
+        # cache_hit excludes both cost and latency (neither is real - no
+        # generation happened). rec_cost_unreliable excludes cost ONLY - it
+        # fires when real output came back at a real latency but the token
+        # count (and therefore cost) is zeroed, a provider-side accounting
+        # gap, not a cache replay - so the latency sample stays trustworthy.
+        if c is not None and not cache_hit and not rec_cost_unreliable(r):
             a["cost_sum"] += c
             a["cost_n"] += 1
-        lat = rec_latency(r)
-        if lat is not None:
-            ctoks = rec_completion_tokens(r)
-            # Guard div-by-zero and skip the plausibility check when we can't
-            # compute a rate at all (no completion-token figure available) -
-            # in that case, trust the latency as-is rather than silently drop it.
-            implausible = (lat > 0 and ctoks is not None and ctoks > 0
-                           and (ctoks / (lat / 1000.0)) > _MAX_PLAUSIBLE_TOKENS_PER_SEC)
-            if not implausible:
-                a["latencies"].append(lat)
+        if lat is not None and not cache_hit:
+            a["latencies"].append(lat)
 
     out = {}
     for m, a in models.items():
@@ -100,6 +135,7 @@ def aggregate(records):
             "latency_known": len(a["latencies"]) > 0,
             "n": a["n"],
             "ctx_exhausted_n": a["ctx_exhausted_n"],
+            "refused_n": a["refused_n"],
         }
     return out, layered
 
@@ -114,11 +150,17 @@ def aggregate(records):
 def aggregate_tests(records):
     """Group records by test and count how many models passed each.
 
-    Pass is layer-dependent: floor tests use the promptfoo `success` boolean;
-    discriminating tests use `score` >= 0.5. Untagged tests fall back to
-    `success` and are left out of both health flags (layer stays None), which
-    preserves the untagged-layers fallback: no misleading saturation/regression
-    calls when nothing tagged the layers.
+    Pass uses the promptfoo `success` boolean for every layer, floor and
+    discriminating alike - which means it respects whatever `threshold` the
+    suite author set on a `g-eval`/`llm-rubric` assertion. This used to be a
+    hardcoded `score >= 0.5` for discriminating tests, independent of the
+    test's own configured threshold; that silently disagreed with a strict
+    threshold (a test author sets `threshold: 1`, expecting a 0.9-scoring
+    model to fail it, and the saturation check would still call the test
+    saturated because 0.9 clears the unrelated 0.5 floor). Untagged tests
+    fall back to `success` too and are left out of both health flags (layer
+    stays None), which preserves the untagged-layers fallback: no misleading
+    saturation/regression calls when nothing tagged the layers.
     """
     tests = {}
     for r in records:
@@ -139,12 +181,9 @@ def aggregate_tests(records):
         t["n_models"] += 1
         model = rec_model(r)
         t["runs_by_model"][model] = t["runs_by_model"].get(model, 0) + 1
-        score = r.get("score")
-        if layer == "discriminating":
-            passed = isinstance(score, (int, float)) and float(score) >= 0.5
-        else:
-            # floor, or untagged: the deterministic must-pass boolean
-            passed = bool(r.get("success"))
+        # promptfoo's own success boolean, for every layer - it already
+        # incorporates whatever threshold the assertion was configured with.
+        passed = bool(r.get("success"))
         if passed:
             t["n_passed"] += 1
         else:

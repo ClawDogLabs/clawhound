@@ -154,6 +154,20 @@ rubric on prose: a documented silent failure, the measurement that caught it, an
 the value. A gotchas/post-incident doc in that shape mines almost directly into
 wrong-proxy cases.
 
+**The trap in writing these: explaining the mechanism precisely enough tips into
+stating the verdict.** A wrong-proxy prompt should describe what the system DOES
+(a restore step, a dedup key, a recount) in full, exact detail - that is not
+recall-leakage, the model needs the mechanism to reason about it - but it must
+never state which outcome is correct, safe, buggy, or destructive. "Taking the
+absolute value correctly round-trips it, but doing this elsewhere silently
+destroys the credit" answers the question before asking it. Read every
+discriminating prompt back and flag any word that names a judgment (correctly,
+safe, must never, the bug is, overstates) rather than a fact about behavior; a
+suite where nearly every model scores near-perfect on rubrics that look hard is
+the visible symptom (see the suite-generation skill's threshold gotcha - without
+an explicit `g-eval` threshold this symptom hides inside a misleadingly high pass
+rate instead of showing up in the score).
+
 ## What clawhound does NOT measure (scope boundaries, state them to the client)
 
 Name these as deliberate non-goals so nobody mistakes silence for coverage:

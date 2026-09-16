@@ -144,12 +144,38 @@ def rec_output_empty(r):
     return out is None or out == ""
 
 
+def rec_refused(r):
+    """True when a record's empty output is a policy/safety refusal, not a
+    budget problem. Checked defensively across provider response shapes:
+    Anthropic's proxy-level guardrails block (response.guardrails.flagged)
+    and the finishReason values ("content_filter", "refusal") providers use
+    to mark a blocked generation. A refusal can spend a handful of reasoning
+    tokens before being blocked, which is exactly rec_context_exhausted's
+    signature (empty output + completion tokens > 0) - so this must be
+    checked BEFORE calling something "context exhausted", or a real policy
+    block gets mislabeled as the model running out of room to think."""
+    resp = r.get("response")
+    if not isinstance(resp, dict):
+        return False
+    guardrails = resp.get("guardrails")
+    if isinstance(guardrails, dict) and guardrails.get("flagged"):
+        return True
+    finish_reason = resp.get("finishReason") or resp.get("finish_reason")
+    if isinstance(finish_reason, str) and finish_reason.lower() in ("content_filter", "refusal"):
+        return True
+    return False
+
+
 def rec_context_exhausted(r):
     """True when a record burned real completion tokens but produced NO
     visible output - the model spent its whole generation budget on hidden
     reasoning and never got to write an answer. Distinct from a genuine wrong
-    answer (which has real output text that was just graded incorrect) and
-    from a true API error (which typically reports 0 completion tokens)."""
+    answer (which has real output text that was just graded incorrect), from
+    a true API error (which typically reports 0 completion tokens), and from
+    a policy refusal (see rec_refused) - a refusal is not a budget problem
+    even when it also has empty output and nonzero completion tokens."""
+    if rec_refused(r):
+        return False
     ctoks = rec_completion_tokens(r)
     return rec_output_empty(r) and ctoks is not None and ctoks > 0
 
@@ -170,6 +196,23 @@ def rec_completion_tokens(r):
             except (TypeError, ValueError):
                 continue
     return None
+
+
+def rec_cost_unreliable(r):
+    """True when a record has real, non-empty output but reports zero (or
+    missing) completion tokens - internally inconsistent, since no real
+    generation produces visible text at zero completion tokens. Seen with a
+    provider's own server-side prompt caching (e.g. xAI reporting the whole
+    request under a `cached` token count, with `completion: 0` and a real,
+    test-specific answer and a genuine multi-second latency): the LATENCY is
+    real and should be trusted, but the cost computed from a zeroed token
+    count is definitionally wrong for that record, not a genuine $0 response.
+    Distinct from rec_context_exhausted (empty output + real tokens) and from
+    a promptfoo response-cache replay (near-zero latency): this one has real
+    output and can have entirely realistic latency, so it must not also
+    suppress the record's latency sample the way a cache hit does."""
+    ctoks = rec_completion_tokens(r)
+    return (not rec_output_empty(r)) and (ctoks is None or ctoks == 0)
 
 
 def _median(vals):

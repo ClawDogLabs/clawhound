@@ -38,6 +38,15 @@ def _sample_records():
     # cost mode -> haiku (cheaper), latency mode -> opus (faster). ------------
     recs.append(rec("anthropic:opus", "tailwind slate palette copy", "floor", True, 1.0, 0.02, "frontend", 500))
     recs.append(rec("anthropic:haiku", "tailwind slate palette copy", "floor", True, 1.0, 0.002, "frontend", 3000))
+    # --- category "impossible": a REAL floor test every model fails - distinct
+    # from "theory" below (no floor tests at all). This is the genuine "no
+    # model clears the bar yet, review the checks" case; must NOT be relabeled
+    # as a no-floor-tests coverage gap, since a real floor test exists here and
+    # every model failed it. Uses ISOLATED model ids (not opus/haiku) so it
+    # doesn't perturb their OVERALL floor rate and the "only opus clears
+    # overall" assertions below. -------------------------------------------
+    recs.append(rec("anthropic:modelc", "unsolvable floor case", "floor", False, 0.0, 0.02, "impossible", 500))
+    recs.append(rec("anthropic:modeld", "unsolvable floor case", "floor", False, 0.0, 0.002, "impossible", 3000))
     # --- category "theory": discriminating-only, so nobody has a floor bar ----
     # A discriminating test EVERY model passes (score >= 0.5): saturated flag.
     recs.append(rec("anthropic:opus", "diagnose devig longshot bias", "discriminating", True, 0.85, 0.02, "theory", 500))
@@ -56,6 +65,46 @@ def _sample_records():
         "success": False, "score": 0.0, "cost": 0.01, "latencyMs": 60000,  # 4000 tok / 60s = ~67 tok/s, a realistic local rate
         "response": {"output": ""},
         "tokenUsage": {"prompt": 90, "completion": 4000, "total": 4090},
+    })
+
+    # --- refused case: empty output + nonzero completion tokens, SAME shape
+    # as context-exhausted above, but this one is a policy/safety block
+    # (response.guardrails.flagged), not a budget problem. Must flag with the
+    # refused marker, NOT the ctx-exhausted one - conflating them mislabels a
+    # provider refusal as the model running out of room to think. -----------
+    recs.append({
+        "provider": {"id": "anthropic:fable"},
+        "testCase": {"description": "refusal probe", "metadata": {"layer": "floor", "category": "math"}},
+        "success": False, "score": 0.0, "cost": 0.01, "latencyMs": 900,
+        "response": {"output": "", "finishReason": "content_filter",
+                     "guardrails": {"flagged": True, "reason": "cyber"}},
+        "tokenUsage": {"prompt": 120, "completion": 52, "total": 172},
+    })
+
+    # --- cache-hit latency case: near-zero latency AND completion == 0 (the
+    # replay zeroed the token count too), so the tok/s ceiling check alone
+    # cannot see it (0 tokens / any time = 0 tok/s, under the ceiling). Only
+    # the absolute latency floor catches this shape. success=True so this
+    # does not also touch the regression/saturation assertions below. -------
+    recs.append({
+        "provider": {"id": "anthropic:opus"},
+        "testCase": {"description": "cache latency probe", "metadata": {"layer": "floor", "category": "math"}},
+        "success": True, "score": 1.0, "cost": 0.0, "latencyMs": 6,
+        "response": {"output": "cached answer"},
+        "tokenUsage": {"prompt": 50, "completion": 0, "total": 50},
+    })
+
+    # --- provider-side cache case (e.g. xAI): REAL output, REAL multi-second
+    # latency, but completion tokens report 0 (the whole request landed under
+    # a `cached` count instead) so cost computes to 0 too. Unlike the record
+    # above, the latency here is genuine and must be KEPT; only cost should
+    # be excluded. success=True so it doesn't touch other assertions. -------
+    recs.append({
+        "provider": {"id": "anthropic:haiku"},
+        "testCase": {"description": "provider cache accounting probe", "metadata": {"layer": "floor", "category": "frontend"}},
+        "success": True, "score": 1.0, "cost": 0.0, "latencyMs": 2600,
+        "response": {"output": "a real, test-specific answer"},
+        "tokenUsage": {"prompt": 0, "completion": 0, "cached": 616, "total": 616},
     })
     return recs
 
@@ -80,6 +129,32 @@ def _selftest():
                for m, t, _f, _r in regressions), regressions
     # the all-pass floor test must not appear as a regression
     assert all(t != "odds axiom deflate/inflate" for _m, t, _f, _r in regressions), regressions
+
+    # Refused vs context-exhausted must never cross-contaminate: same empty-
+    # output-plus-tokens shape, different cause, different marker.
+    assert agg["anthropic:fable"]["refused_n"] == 1, agg["anthropic:fable"]
+    assert agg["anthropic:fable"]["ctx_exhausted_n"] == 0, agg["anthropic:fable"]
+    assert agg["anthropic:sonnet"]["ctx_exhausted_n"] == 1, agg["anthropic:sonnet"]
+    assert agg["anthropic:sonnet"]["refused_n"] == 0, agg["anthropic:sonnet"]
+
+    # A cache-hit replay (near-zero latency, cost 0, ctoks 0) must not dilute
+    # the cost/latency stats toward "free"/"instant" - opus's real records
+    # are all cost 0.02; if the cache record leaked in, cost_per_test would
+    # drop to 0.10/6 =~ 0.0167 instead of staying 0.02.
+    opus_cpt = agg["anthropic:opus"]["cost_per_test"]
+    assert opus_cpt is not None and abs(opus_cpt - 0.02) < 1e-9, opus_cpt
+
+    # A record with real output + real latency but zero completion tokens
+    # (provider-side cache accounting, e.g. xAI) must exclude its cost (0.0
+    # is not a genuine free response here) while KEEPING its latency sample.
+    # Haiku's 3 real records are all cost 0.002; if the fake record's cost=0
+    # leaked in, cost_per_test would drop to 0.006/4 = 0.0015 instead of 0.002.
+    haiku_cpt = agg["anthropic:haiku"]["cost_per_test"]
+    assert haiku_cpt is not None and abs(haiku_cpt - 0.002) < 1e-9, haiku_cpt
+    # The 2600ms real latency must still be reflected (not dropped like a
+    # true cache hit would be) - haiku's other 3 records are all 3000ms, so
+    # a median that moved off 3000 proves the 2600ms sample was counted.
+    assert agg["anthropic:haiku"]["latency_s"] is not None
 
     # Per-category routing: different models win in different categories.
     assert categorized, "sample records should be categorized"
@@ -184,6 +259,10 @@ def _selftest():
     # KEEP: legend paragraph, all-models table, incumbent marker, collapse-all.
     assert "you are here" in doc, "incumbent marker missing from HTML"
     assert "NO MODEL CLEARS THE BAR" in doc, "no-clear marking missing from HTML"
+    # "theory" (no floor tests at all) must render the DISTINCT, calmer label -
+    # conflating it with a genuine all-models-failed floor case is the bug
+    # this fixture guards against.
+    assert "NO FLOOR TESTS HERE" in doc, "no-floor-tests marking missing from HTML"
     assert "for everyday work" in doc, "owner headline missing from HTML"
     assert "Expand all" in doc and "Collapse all" in doc, "collapse-all control missing"
     assert "<details class=\"cat\"" in doc, "collapsible category detail missing"

@@ -18,14 +18,31 @@ from .charts import _model_colors, _frontier_ylo, _svg_frontier_plot, _frontier_
 # used ONLY to estimate GRADING spend from the judge's grading tokens: promptfoo
 # prices generation itself but does not price grading. Provider/generation cost
 # always comes from promptfoo's own per-record figure, so a missing entry here
-# never affects it; it only means the judge's grading cost shows "not auto-priced".
-# Keyed by a substring of the model id. Update when prices change.
+# never affects it; it only means the judge's grading cost shows "not auto-priced"
+# - an honest gap, not a wrong number, for any judge not in this table.
+#
+# This table is NOT live-fetched (recommend.py stays offline/deterministic -
+# no network call belongs in a report-generation hot path over a static
+# results.json). Instead it's refreshed as a separate, occasional step: before
+# trusting a grading-cost estimate on a suite with a new judge, or periodically
+# (a quarter is a reasonable cadence), an AGENT session re-verifies every price
+# below against current provider docs/pricing pages (WebSearch/WebFetch - a
+# hardcoded scraper is not robust against pricing-page format changes) and
+# updates this table with the verification date. Keyed by a substring of the
+# model id.
+#
+# Last fully re-verified: 2026-09-16 (all entries below checked against
+# provider pricing pages this pass, not carried over from an older date).
 _PRICE_PER_M = {
     "claude-opus-4-8": (5, 25), "claude-opus-5": (5, 25),
     "claude-opus-4-7": (5, 25), "claude-opus-4-6": (5, 25),
     "claude-sonnet-5": (3, 15), "claude-sonnet-4-6": (3, 15),
     "claude-haiku-4-5": (1, 5), "claude-fable-5": (10, 50),
     "gpt-6-astra": (10, 50),
+    "gemini-3.6-flash": (1.50, 7.50), "gemini-3.8-flash": (0.75, 3.75),
+    "gemini-3.1-pro-preview": (2, 12),
+    "gpt-5.6-terra": (2, 12), "gpt-5.6-sol": (4, 20),
+    "grok-4.3": (1.25, 2.50), "grok-4.5": (2, 6), "grok-4.6": (2, 6),
 }
 
 
@@ -77,6 +94,7 @@ table.routing td .mdl { color: #0f5a2a; font-weight: 600; }
 table.routing td .rt-metric { color: #778; font-size: .84rem; }
 table.routing td .rt-note { color: #8250df; font-size: .8rem; font-weight: 600; }
 table.routing tr.none td { color: #b35900; }
+table.routing tr.no-floor td { color: #556; }
 .lens-note { color: #667; font-size: .84rem; margin: .2rem 0 .3rem; }
 .disagree-note { color: #8a6d00; font-size: .88rem; margin: .35rem 0; }
 .agree-note { color: #4a8a5a; font-size: .84rem; margin: .35rem 0; }
@@ -109,6 +127,7 @@ details.cat > summary .arrow { color: #889; }
 details.cat > summary .mdl { color: #0f5a2a; font-weight: 600; }
 details.cat > summary .why { color: #778; font-size: .82rem; margin-left: .3rem; }
 details.cat[data-none="1"] > summary .mdl { color: #b35900; }
+details.cat[data-no-floor="1"] > summary .mdl { color: #556; }
 .cat-body { padding: .3rem .9rem .9rem; }
 .fail-head { font-weight: 600; color: #b35900; font-size: .84rem; margin: .8rem 0 .3rem; }
 ul.fails { margin: .2rem 0 .2rem 1.1rem; padding: 0; }
@@ -223,12 +242,26 @@ def _model_table(agg, winner, incumbent):
         fr_v, d_v, lat_v, c_v = (s["floor_rate"], s["disc"],
                                  s["latency_s"], s["cost_per_test"])
         ctx_n = s.get("ctx_exhausted_n") or 0
+        refused_n = s.get("refused_n") or 0
+        # Two distinct no-visible-answer failure modes, never conflated: a
+        # budget problem (ctx_n, burned the whole generation on hidden
+        # reasoning) is a different fix for the suite author than a provider
+        # safety/content-filter block (refused_n), which is not a budget or
+        # correctness problem at all.
+        notes = []
         if ctx_n:
-            note = ('failed to finish {n} test{ss} within the allotted context/thinking '
+            notes.append(('failed to finish {n} test{ss} within the allotted context/thinking '
                     'budget (burned the whole generation on hidden reasoning and '
-                    'returned no visible answer)').format(n=ctx_n, ss="" if ctx_n == 1 else "s")
-            name_html = ('<span class="ctx-warn" title="{note}">{display_m}*'
-                        '</span>').format(note=esc(note), display_m=esc(fmt_model_name(m)))
+                    'returned no visible answer)').format(n=ctx_n, ss="" if ctx_n == 1 else "s"))
+        if refused_n:
+            notes.append(('{n} test{ss} blocked by the provider\'s safety/content filter '
+                    '(no visible answer, not a wrong answer and not a budget problem)'
+                    ).format(n=refused_n, ss="" if refused_n == 1 else "s"))
+        if notes:
+            marker = ("*" if ctx_n else "") + ("†" if refused_n else "")
+            name_html = ('<span class="ctx-warn" title="{note}">{display_m}{marker}'
+                        '</span>').format(note=esc("; ".join(notes)),
+                                          display_m=esc(fmt_model_name(m)), marker=marker)
         else:
             name_html = esc(fmt_model_name(m))
         out.append(
@@ -242,7 +275,7 @@ def _model_table(agg, winner, incumbent):
                 ls=(lat_v if lat_v is not None else 1e15),
                 cs=(c_v if c_v is not None else 1e15),
                 fr=esc(fmt_rate(fr_v)), d=esc(fmt_score(d_v)),
-                lat=esc(fmt_latency(lat_v)), c=esc(fmt_cost(c_v)), tag=tag))
+                lat=esc(fmt_latency(lat_v)), c=esc(fmt_cost(c_v, m)), tag=tag))
     out.append("</tbody></table>")
     return "".join(out)
 
@@ -358,11 +391,21 @@ def _dual_routing_html(cat_aggs, bar, disc_bar, labels):
         fast_m, _fc, fast_lat = dr[c]["fastest"]
         if cheap_m is None:
             strong = strongest_model(cat_aggs[c])
+            no_floor_tests = bool(cat_aggs[c]) and all(
+                s.get("floor_rate") is None for s in cat_aggs[c].values())
+            if no_floor_tests:
+                note = ('no floor tests in this category - by discriminating '
+                        'score, {strong} ranks highest').format(
+                            strong=esc(fmt_model_name(str(strong))))
+                row_cls = "no-floor"
+            else:
+                note = 'no model clears the bar yet ({strong} is closest)'.format(
+                    strong=esc(fmt_model_name(str(strong))))
+                row_cls = "none"
             parts.append(
-                '<tr class="none"><td class="l"><b>{cat}</b></td>'
-                '<td class="l" colspan="2">no model clears the bar yet '
-                '({strong} is closest)</td></tr>'.format(
-                    cat=esc(lbl), strong=esc(fmt_model_name(str(strong)))))
+                '<tr class="{cls}"><td class="l"><b>{cat}</b></td>'
+                '<td class="l" colspan="2">{note}</td></tr>'.format(
+                    cls=row_cls, cat=esc(lbl), note=note))
         elif cheap_m == fast_m:
             parts.append(
                 '<tr><td class="l"><b>{cat}</b></td>'
@@ -370,7 +413,7 @@ def _dual_routing_html(cat_aggs, bar, disc_bar, labels):
                 '<span class="rt-note">cheapest and fastest</span> '
                 '<span class="rt-metric">{cost}, {lat}</span></td></tr>'.format(
                     cat=esc(lbl), m=esc(fmt_model_name(cheap_m)),
-                    cost=esc(fmt_cost_u(cheap_cost)), lat=esc(fmt_latency(fast_lat))))
+                    cost=esc(fmt_cost_u(cheap_cost, cheap_m)), lat=esc(fmt_latency(fast_lat))))
         else:
             parts.append(
                 '<tr><td class="l"><b>{cat}</b></td>'
@@ -378,7 +421,7 @@ def _dual_routing_html(cat_aggs, bar, disc_bar, labels):
                 '<span class="rt-metric">{cost}</span></td>'
                 '<td class="l"><span class="mdl">{fm}</span> '
                 '<span class="rt-metric">{lat}</span></td></tr>'.format(
-                    cat=esc(lbl), cm=esc(fmt_model_name(cheap_m)), cost=esc(fmt_cost_u(cheap_cost)),
+                    cat=esc(lbl), cm=esc(fmt_model_name(cheap_m)), cost=esc(fmt_cost_u(cheap_cost, cheap_m)),
                     fm=esc(fmt_model_name(fast_m)), lat=esc(fmt_latency(fast_lat))))
     parts.append('</tbody></table>')
     return "".join(parts)
@@ -394,12 +437,13 @@ def _drilldown_html(owner_route, cat_aggs, cat_fails, labels, incumbent):
         i = owner_route.get(c, {"model": None, "reason": "", "strongest": None})
         lbl = category_label(c, labels)
         if i["model"] is None:
+            label = "NO FLOOR TESTS HERE" if i.get("no_floor_tests") else "NO MODEL CLEARS THE BAR"
             summ = ('<span class="cat">{cat}</span> <span class="arrow">-></span> '
-                    '<span class="mdl">NO MODEL CLEARS THE BAR</span>'
+                    '<span class="mdl">{label}</span>'
                     '<span class="why">{why}</span>').format(
-                        cat=esc(lbl),
+                        cat=esc(lbl), label=label,
                         why=(" - " + esc(i["reason"])) if i.get("reason") else "")
-            none_attr = ' data-none="1"'
+            none_attr = ' data-no-floor="1"' if i.get("no_floor_tests") else ' data-none="1"'
         else:
             summ = ('<span class="cat">{cat}</span> <span class="arrow">-></span> '
                     'run <span class="mdl">{m}</span>'

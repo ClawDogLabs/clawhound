@@ -105,9 +105,51 @@ rest into a gray "+N more" group).
   thinking models AND the judge, or they can spend the whole budget thinking and
   return EMPTY output (scored as a failure). Symptom: `finishReason: length`.
 - **Local models:** lower `-j`; pull the models first or the run errors on a missing one.
+  Include at least one in every suite you can — it's the only genuinely-free baseline;
+  a suite with zero local models has nothing to sanity-check "$0 (free)" against.
 - **Model IDs drift.** A wrong id errors only that one provider — fix the string and rerun.
 - **A "floor" test that most models fail is usually the TEST, not the models**
   (too strict, or naked-recall). The report's suite-health block flags these; fix the suite.
+- **A "floor" test with no floor cases in a category ≠ a failed category.** If a
+  category is pure discriminating (no floor tests at all), the report says so
+  explicitly ("NO FLOOR TESTS HERE" / "no floor tests in this category") rather than
+  the alarming "NO MODEL CLEARS THE BAR" — that phrase is reserved for a REAL floor
+  test every model actually failed. If you see the alarming one, check the category
+  actually has floor cases before assuming every model is broken.
+- **Rerunning a suite after editing only some tests? promptfoo caches unchanged
+  (provider, prompt, config) tuples.** Only the tests you touched hit the API fresh;
+  the rest replay from the last run. This is correct/desired for cost, but two
+  side effects to know about: (1) a cache replay reports near-zero latency and often
+  zeroed cost/tokens for that record — `recommend.py` now excludes these from the
+  cost/latency averages, but if a NEW provider shape slips past that detection, a
+  suspiciously-perfect "$0 (free)" or "0.0s" for a PAID model is the tell something's
+  off, not a genuinely free/instant response; (2) a provider's own server-side prompt
+  caching (seen with xAI: `tokenUsage.cached` carries the real count, `completion: 0`)
+  looks similar but has REAL latency — `recommend.py` treats that as a cost-accounting
+  gap only, keeping the latency sample, since the generation genuinely happened.
+- **A safety/content-filter refusal looks identical to context exhaustion**
+  (empty output + some tokens spent on hidden reasoning before the block) but is a
+  different problem with a different fix. Check `response.finishReason` (`"content_filter"`
+  or `"refusal"`) / `response.guardrails.flagged` before assuming a bigger `max_tokens`
+  will fix it — it won't; that's a provider policy block, not a budget problem.
+  `recommend.py` marks these separately (`†` vs `*`) for exactly this reason.
+- **Discriminating `g-eval`/`llm-rubric` assertions need an explicit `threshold`,
+  always** (see the suite-generation skill). Without one, promptfoo's default pass/fail
+  is lenient enough that a suite can read as ~99% passing while the underlying 0-1
+  scores show real spread — the SCORE still ranks correctly, but the boolean (and
+  therefore the suite-health SATURATED warning) becomes noise.
+- **A discriminating prompt that narrates the answer inside the scenario measures
+  reading comprehension, not the reasoning it's supposed to test** (see the
+  suite-generation skill's "No narrated-resolution tests" section). This is the single
+  biggest reason a freshly-mined suite comes back near-saturated on a strong model
+  bracket — re-read every discriminating prompt for a stated verdict, not just a
+  described mechanism.
+- **The judge's grading cost needs its price in `postprocess/recommend_lib/report.py`'s
+  `_PRICE_PER_M` table, or it shows "not auto-priced".** This table is intentionally
+  NOT live-fetched (report generation stays offline/deterministic); it's refreshed as
+  a separate occasional step — an agent session re-verifies prices against current
+  provider docs (WebSearch/WebFetch, never guessed) before trusting a grading-cost
+  estimate on a suite with a new judge, and dates the table on each refresh pass.
 
 ## Layout
 ```

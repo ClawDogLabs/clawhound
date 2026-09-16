@@ -161,6 +161,15 @@ number mine almost directly into these.
   number, the em/en dash glyphs, a required literal); for anything an explanation
   could contain, use an `llm-rubric` that judges what the answer DOES, not which
   strings it happens to mention.
+- **Set an explicit `threshold` on every discriminating `g-eval`, always.**
+  promptfoo's default pass/fail for `g-eval` is lenient enough that a suite can
+  read as ~99% "passed" while the underlying 0-1 scores show real spread (e.g.
+  a 0.77-1.0 band with most models perfect) - the score still ranks correctly,
+  but the boolean, and therefore `recommend.py`'s SATURATED warning, becomes
+  noise. `threshold: 1` (require every criterion) is the default worth reaching
+  for on a multi-criterion rubric; document the reasoning if you pick lower. A
+  missing threshold is not neutral, it is a silent decision to accept
+  promptfoo's default.
 
 ## No naked-recall tests (mine the fact, do not test recall of it)
 
@@ -193,6 +202,41 @@ than asking the model to recall a value it was never given. A test that reads "w
 is the hex value of our accent color?" or "what is our API base path?" with the
 answer nowhere in the prompt is broken; rebuild it so the prompt supplies the token
 or path and the test checks that the model uses it correctly.
+
+## No narrated-resolution tests (describe the mechanism, never the verdict)
+
+**A discriminating prompt must describe WHAT the system does, never WHICH
+outcome is correct.** This is a distinct failure mode from naked-recall (that
+one hands the model a fact it can't know; this one hands the model the
+answer it was supposed to derive), and it is easy to introduce by accident
+while writing a careful, precise scenario - explaining the mechanism well
+tips into explaining the conclusion.
+
+Bad (states the verdict inline): *"...where taking the absolute value
+correctly round-trips it back... a reinstatement credit... must NEVER be
+flipped to positive, since doing so silently destroys the credit... Is this
+safe?"* The model is just confirming what it was already told.
+
+Good (mechanism only, verdict withheld): *"...The restore step sets
+chargeback=0 and takes the absolute value of commission, in one atomic
+update, for that specific row. A reinstatement credit is stored as a
+permanently negative value with no chargeback flag involved. A developer
+proposes a startup check that takes the absolute value of every negative
+commission value, independent of any flag. Walk through what this does to
+each situation, and say whether it's a good idea."* Same facts, no verdict -
+the model has to trace the mechanism itself to reach one.
+
+Litmus test for every discriminating case: read the prompt back and ask "does
+this sentence tell the model which answer is right, or only what the system
+does?" If a sentence states the correct/incorrect judgment (correctly, safe,
+must never, the bug is, silently destroys, overstates) rather than a fact
+about behavior, rewrite it as a description of mechanism and let the model
+reach the judgment. This failure is invisible in isolation - a prompt with
+a stated verdict reads as MORE rigorous, not less, because it is more
+precise - so check for it explicitly rather than trusting a read-through to
+catch it; a suite where every model scores near-perfect on a hard-looking
+rubric is the symptom to watch for (see the threshold gotcha above - without
+an explicit threshold this symptom is invisible in the pass-rate too).
 
 ## Cautions (state these to the human, do not skip them)
 

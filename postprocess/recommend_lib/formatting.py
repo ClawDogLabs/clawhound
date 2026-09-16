@@ -12,25 +12,48 @@ def fmt_score(x):
     return "n/a" if x is None else "{:.2f}".format(x)
 
 
-def fmt_cost(x):
+def is_known_free_provider(model_id):
+    """True only for providers we KNOW cost nothing to run: local/self-hosted
+    endpoints (ollama, and other local-inference prefixes as they show up).
+    This is the only thing allowed to earn the "(free)" label on a $0 cost -
+    a $0 reading from a PAID provider is not evidence of a free response, it
+    is evidence the cost accounting for that record is broken (a promptfoo
+    cache replay, a provider-side token-accounting gap, a judge missing from
+    the grading price table - this session hit all three). Extend this list
+    only for providers that are genuinely metered at $0, never to silence a
+    suspicious zero."""
+    if not model_id:
+        return False
+    m = model_id.lower()
+    return m.startswith("ollama:") or m.startswith("ollama/")
+
+
+def fmt_cost(x, model_id=None):
     # Cost per 100 tests, as a bare dollar figure - the unit lives in the column
     # header / axis title ("cost /100"), not repeated on every value. Absolute run
     # totals use their own formatter (the run-cost panel).
     if x is None:
         return "n/a"
     if x == 0:
-        return "$0 (free)"
+        if is_known_free_provider(model_id):
+            return "$0 (free)"
+        # A paid provider reading exactly $0 is a red flag, not good news -
+        # every real cause we've found is a cost-accounting gap, never a
+        # genuinely free paid response. Surface it for a human to check
+        # rather than asserting "free".
+        return "$0 (verify pricing)"
     per_c = x * 100.0
     if per_c < 0.01:
         return "<$0.01"
     return "${:,.2f}".format(per_c)
 
 
-def fmt_cost_u(x):
+def fmt_cost_u(x, model_id=None):
     """fmt_cost with the '/100' unit appended - for inline spots (per-service
     routing, the chart tooltip) that have no column header to carry the unit."""
-    c = fmt_cost(x)
-    return c + "/100" if c.startswith("$") and c != "$0 (free)" else c
+    c = fmt_cost(x, model_id)
+    already_qualified = c in ("$0 (free)", "$0 (verify pricing)")
+    return c + "/100" if c.startswith("$") and not already_qualified else c
 
 
 def fmt_latency(x):

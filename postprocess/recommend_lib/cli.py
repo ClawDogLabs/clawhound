@@ -8,13 +8,21 @@ from .aggregate import suite_health
 def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize="cost"):
     field = _metric_field(optimize)
     rows = sorted(agg.items(), key=optimize_sort_key(optimize))
-    # Suffix an asterisk on any model that burned its whole budget on hidden
-    # reasoning and returned no visible answer at least once (see
-    # rec_context_exhausted) - a distinct failure mode from a graded wrong
-    # answer, worth flagging right in the name column.
-    display_names = {m: (fmt_model_name(m)
-                         + ("*" if (s.get("ctx_exhausted_n") or 0) else ""))
-                     for m, s in rows}
+    # Suffix a marker on any model that returned no visible answer at least
+    # once, distinguishing WHY: "*" burned its whole budget on hidden
+    # reasoning (rec_context_exhausted); "†" was blocked by a provider
+    # safety/content filter (rec_refused). Both are distinct from a graded
+    # wrong answer (which has real output text), worth flagging right in the
+    # name column - conflating the two mislabels a policy refusal as a
+    # budget problem, which is a different fix for the suite author.
+    def _marker(s):
+        mk = ""
+        if s.get("ctx_exhausted_n") or 0:
+            mk += "*"
+        if s.get("refused_n") or 0:
+            mk += "†"
+        return mk
+    display_names = {m: fmt_model_name(m) + _marker(s) for m, s in rows}
     name_w = max([len("model")] + [len(display_names[m]) for m, _ in rows]) + 2
     # Always show cost/test when known; the active metric gets its own column.
     header = "{:<{w}} {:>10} {:>8} {:>14} {:>14}".format(
@@ -22,6 +30,7 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
     print(header)
     print("-" * len(header))
     ctx_warned = []
+    refused_warned = []
     for m, s in rows:
         cpt = s["cost_per_test"]
         mark = ""
@@ -31,15 +40,24 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
             mark = "  (you are here)"
         print("{:<{w}} {:>10} {:>8} {:>14} {:>14}{}".format(
             display_names[m], fmt_rate(s["floor_rate"]), fmt_score(s["disc"]),
-            fmt_cost(cpt), fmt_latency(s["latency_s"]), mark, w=name_w))
+            fmt_cost(cpt, m), fmt_latency(s["latency_s"]), mark, w=name_w))
         ctx_n = s.get("ctx_exhausted_n") or 0
         if ctx_n:
             ctx_warned.append((fmt_model_name(m), ctx_n))
+        refused_n = s.get("refused_n") or 0
+        if refused_n:
+            refused_warned.append((fmt_model_name(m), refused_n))
     print()
     if ctx_warned:
         for name, n in ctx_warned:
             print("* {}: failed to finish {} test{} within the allotted context/thinking "
                   "budget (no visible answer, all budget spent on hidden reasoning)."
+                  .format(name, n, "" if n == 1 else "s"))
+        print()
+    if refused_warned:
+        for name, n in refused_warned:
+            print("† {}: {} test{} blocked by the provider's safety/content filter "
+                  "(no visible answer, not a wrong answer and not a budget problem)."
                   .format(name, n, "" if n == 1 else "s"))
         print()
     if not layered:
@@ -113,22 +131,32 @@ def print_routing(cat_aggs, categorized, bar, disc_bar, optimize="cost"):
         "category", "model", "cost/100", "latency", cw=cat_w, mw=mdl_w)
     print(header)
     print("-" * len(header))
+    no_floor_cats = []
     for c in cats:
         model, cpt, lat_s = routing[c]
         if model is None:
+            no_floor_tests = bool(cat_aggs[c]) and all(
+                s.get("floor_rate") is None for s in cat_aggs[c].values())
+            label = "NO FLOOR TESTS HERE" if no_floor_tests else "NO MODEL CLEARS THE BAR"
+            if no_floor_tests:
+                no_floor_cats.append(c)
             print("{:<{cw}} {:<{mw}} {:>14} {:>14}".format(
-                c, "NO MODEL CLEARS THE BAR", "-", "-", cw=cat_w, mw=mdl_w))
+                c, label, "-", "-", cw=cat_w, mw=mdl_w))
         else:
             display_model = model_display.get(model, fmt_model_name(model))
             print("{:<{cw}} {:<{mw}} {:>14} {:>14}".format(
-                c, display_model, fmt_cost(cpt), fmt_latency(lat_s), cw=cat_w, mw=mdl_w))
+                c, display_model, fmt_cost(cpt, model), fmt_latency(lat_s), cw=cat_w, mw=mdl_w))
     print()
     pick = ("fastest by median latency that clears the bar, "
             if optimize == "latency" else "cheapest that clears the bar, ")
     print("Routing policy: send each category to the model shown ({}floor >= {:.0f}%{})."
           .format(pick, bar * 100,
                   "" if disc_bar <= 0 else ", disc >= {:.2f}".format(disc_bar)))
-    unmet = [c for c in cats if routing[c][0] is None]
+    unmet = [c for c in cats if routing[c][0] is None and c not in no_floor_cats]
     if unmet:
         print("No model clears the bar in: {}. Raise coverage, lower the bar, "
               "or add a stronger model for these.".format(", ".join(unmet)))
+    if no_floor_cats:
+        print("No floor tests exist in: {}, so the bar can't be evaluated there "
+              "- this is a suite coverage gap, not a model failure."
+              .format(", ".join(no_floor_cats)))

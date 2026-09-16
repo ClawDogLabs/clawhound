@@ -150,13 +150,21 @@ def category_route_info(cat, agg, bar, disc_bar, optimize):
     """Everything the owner line for one category needs.
 
     Returns dict: model (recommended, or None), n_clearers, strongest (closest
-    model when none clears), reason (plain sentence fragment), cpt, lat_s.
+    model when none clears), reason (plain sentence fragment), cpt, lat_s,
+    no_floor_tests (True when the bar literally cannot be evaluated here).
     Reasons, none hardcoding a model name:
       "the only model that clears the bar"        exactly one model clears
       "fastest that clears the bar" / "cheapest that clears the bar"
                                                   more than one clears
       "no model clears the bar yet, <strongest> is closest, review the checks"
-                                                  nothing clears
+                                                  models exist, floor tests exist, all failed
+      "this category has no floor tests, so the bar can't be evaluated here;
+       by discriminating score, <strongest> ranks highest"
+                                                  no floor tests in this category at all -
+                                                  clears() is unsatisfiable by construction
+                                                  (floor_rate is None for every model), which
+                                                  is a coverage gap in the SUITE, not a model
+                                                  failure - do not render this like a failed bar
     """
     def clears(s):
         if s["floor_rate"] is None or s["floor_rate"] < bar:
@@ -171,17 +179,23 @@ def category_route_info(cat, agg, bar, disc_bar, optimize):
     lat_s = agg[model]["latency_s"] if (model and model in agg) else None
     if model is None:
         strong = strongest_model(agg)
-        reason = ("no model clears the bar yet, " + str(strong)
-                  + " is closest, review the checks")
+        no_floor_tests = bool(agg) and all(s.get("floor_rate") is None for s in agg.values())
+        if no_floor_tests:
+            reason = ("this category has no floor tests, so the bar can't be evaluated "
+                      "here; by discriminating score, " + str(strong) + " ranks highest")
+        else:
+            reason = ("no model clears the bar yet, " + str(strong)
+                      + " is closest, review the checks")
         return {"model": None, "n_clearers": 0, "strongest": strong,
-                "reason": reason, "cpt": None, "lat_s": None}
+                "reason": reason, "cpt": None, "lat_s": None,
+                "no_floor_tests": no_floor_tests}
     if len(clearers) == 1:
         reason = "the only model that clears the bar"
     else:
         reason = ("fastest that clears the bar" if optimize == "latency"
                   else "cheapest that clears the bar")
     return {"model": model, "n_clearers": len(clearers), "strongest": model,
-            "reason": reason, "cpt": cpt, "lat_s": lat_s}
+            "reason": reason, "cpt": cpt, "lat_s": lat_s, "no_floor_tests": False}
 
 
 def owner_routing(cat_aggs, bar, disc_bar, optimize="cost"):
