@@ -282,6 +282,18 @@ def _selftest():
     # conflating it with a genuine all-models-failed floor case is the bug
     # this fixture guards against.
     assert "NO FLOOR TESTS HERE" in doc, "no-floor-tests marking missing from HTML"
+    # the owner-summary bullet list must ALSO use the distinct "no floor tests
+    # here" wording for "theory", never "no model clears it yet" - that phrase
+    # implies models were tried and failed, which never happened here (no
+    # floor test in this category ever gated anything).
+    assert "no floor tests here" in doc, \
+        "owner-summary must render the no-floor-tests label, not a generic no-clear one"
+    assert '<li class="no-floor">' in doc, "owner-summary no-floor <li> class missing"
+    # "impossible" (a real floor test every model failed) is the genuine
+    # no-clearer case and must keep the original wording, never softened to
+    # the no-floor-tests phrasing.
+    assert "no model clears it yet" in doc, \
+        "genuine no-clearer wording must still appear for a real failed floor test"
     assert "for everyday work" in doc, "owner headline missing from HTML"
     assert "Expand all" in doc and "Collapse all" in doc, "collapse-all control missing"
     assert "<details class=\"cat\"" in doc, "collapsible category detail missing"

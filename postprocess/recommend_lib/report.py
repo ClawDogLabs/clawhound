@@ -65,6 +65,7 @@ h2 { font-size: 1.05rem; margin: 1.8rem 0 .6rem; color: #2a3140; }
 .owner li .mdl { color: #0f5a2a; font-weight: 600; }
 .owner li .why { color: #778; font-size: .86rem; }
 .owner li.none .mdl { color: #b35900; }
+.owner li.no-floor .mdl { color: #556; }
 .note { color: #8a6d00; font-size: .86rem; margin: .4rem 0; }
 .chart { background: #fff; border: 1px solid #d7dce4; border-radius: 10px;
   padding: .6rem; overflow-x: auto; }
@@ -337,9 +338,14 @@ def _owner_summary_html(lead_route, route_cost, route_lat, everyday, labels, opt
                                if i["model"] == everyday)
         other = {}
         none_cats = []
+        no_floor_cats = []
         for c, i in lead_route.items():
             if i["model"] is None:
-                none_cats.append(lbl(c))
+                # A category with zero floor tests is a SUITE COVERAGE GAP, not
+                # a model failure - the bar was never evaluable there, so it
+                # must never read as "no model clears it yet" (that implies
+                # models were tried and failed).
+                (no_floor_cats if i.get("no_floor_tests") else none_cats).append(lbl(c))
             elif i["model"] != everyday:
                 other.setdefault(i["model"], []).append(lbl(c))
         head = ('Run <b>{e}</b> for everyday work: {cats}.').format(
@@ -352,7 +358,13 @@ def _owner_summary_html(lead_route, route_cost, route_lat, everyday, labels, opt
             sentences.append('No model clears the bar yet on {cats}; '
                              'review the checks.'.format(
                                  cats=esc(", ".join(sorted(none_cats)))))
-        if not other and not none_cats:
+        if no_floor_cats:
+            sentences.append('{cats} {has} no floor tests yet, so the bar can\'t '
+                             'be evaluated there - a suite coverage gap, not a '
+                             'model failure.'.format(
+                                 cats=esc(", ".join(sorted(no_floor_cats))),
+                                 has="has" if len(no_floor_cats) == 1 else "have"))
+        if not other and not none_cats and not no_floor_cats:
             sentences.append('It clears the bar on every categorized service.')
         parts.append('<p class="headline">' + " ".join(sentences) + "</p>")
         parts.append('<p class="lens-note">Headline follows your <b>{lw}</b> lens. '
@@ -383,11 +395,18 @@ def _owner_summary_html(lead_route, route_cost, route_lat, everyday, labels, opt
         mc = route_cost[c]["model"]
         ml_ = route_lat[c]["model"]
         if i["model"] is None:
-            parts.append(
-                '<li class="none"><span class="cat">{cat}</span> '
-                '<span class="arrow">-></span> <span class="mdl">no model clears '
-                'it yet</span> <span class="why">({why})</span></li>'.format(
-                    cat=esc(lbl(c)), why=esc(i["reason"])))
+            if i.get("no_floor_tests"):
+                parts.append(
+                    '<li class="no-floor"><span class="cat">{cat}</span> '
+                    '<span class="arrow">-></span> <span class="mdl">no floor '
+                    'tests here</span> <span class="why">({why})</span></li>'.format(
+                        cat=esc(lbl(c)), why=esc(i["reason"])))
+            else:
+                parts.append(
+                    '<li class="none"><span class="cat">{cat}</span> '
+                    '<span class="arrow">-></span> <span class="mdl">no model clears '
+                    'it yet</span> <span class="why">({why})</span></li>'.format(
+                        cat=esc(lbl(c)), why=esc(i["reason"])))
         elif mc is not None and ml_ is not None and mc != ml_:
             parts.append(
                 '<li><span class="cat">{cat}</span> <span class="arrow">-></span> '

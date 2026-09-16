@@ -93,6 +93,14 @@ treat it as the checklist every later step is measured against.
 
 
 
+**Every category needs at least one floor test.** A category with only
+discriminating cases has no pass/fail bar, so `recommend.py` can never route
+anything to it - it reports "no floor tests here" (a coverage gap) forever,
+not a real routing verdict. Before finishing a generation, check every
+category has at least one `layer: floor` case; add one (deterministic where
+possible, `llm-rubric` where the rule is a genuine judgment) to any category
+that has none.
+
 ### Category = service, in a multi-repo project
 
 For a MULTI-REPO project, each sub-repo or service is its own category. On EV
@@ -309,3 +317,8 @@ it ("that service has no live AI behavior") or reject it ("mine it too") on purp
 Silence is not acceptance. This holds in augment mode as well: map the surfaces the
 existing suite already covers against the ones your additions cover, and flag any
 surveyed surface still at zero.
+
+Also check every category against its own test list for at least one `layer:
+floor` case (see the floor-test-per-category rule above). A category that is
+all discriminating is a distinct gap from an uncovered surface - it has cases,
+just none that gate a pass/fail bar - so flag it separately in the same report.

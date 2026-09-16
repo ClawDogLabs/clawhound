@@ -47,6 +47,16 @@ root) so every service is represented and gets its own routing verdict. A
 single-repo project can instead categorize by topic. Either way, no test ships
 without a layer, a category, AND a plain summary.
 
+**Every category must carry at least one floor test.** A category with only
+discriminating tests has no pass/fail bar to route on at all: `recommend.py`
+cannot say "no model clears it" (nothing was ever gated) or "run this one"
+(nothing to gate on), so it reports the category as a coverage gap instead - a
+distinct, calmer verdict than a real no-clearer, but still a category nobody
+can be routed to. Before shipping a suite, check every category against its own
+test list and add at least one deterministic (or `llm-rubric` judgment) floor
+case to any category that has none, rather than leaving it perpetually
+unroutable.
+
 ## Category sidecar (`categories.yaml`)
 
 Alongside `promptfooconfig.yaml`, the miner emits a `categories.yaml` sidecar, one
