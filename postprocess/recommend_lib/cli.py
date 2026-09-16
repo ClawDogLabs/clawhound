@@ -109,6 +109,22 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
                   .format(inc_display, save, better, unit))
 
 
+def print_benchmark(incumbent, compare_ids, deltas):
+    print()
+    title = "Benchmark comparison"
+    print(title)
+    print("-" * len(title))
+    print("Benchmark: " + fmt_model_name(incumbent))
+    for cid, d in zip(compare_ids, deltas):
+        cost_s = "cost n/a" if d["cost_pct"] is None else "{:+.0f}% cost".format(d["cost_pct"])
+        lat_s = "latency n/a" if d["latency_pct"] is None else "{:+.0f}% latency".format(d["latency_pct"])
+        disc_s = "disc n/a" if d["disc_delta"] is None else "{:+.2f} disc".format(d["disc_delta"])
+        print("{}: {}, {}, {}".format(fmt_model_name(cid), cost_s, lat_s, disc_s))
+    print()
+    print("Positive cost/latency is worse (more expensive/slower than the "
+          "benchmark); positive disc is better (higher quality).")
+
+
 def print_health(tests, layered):
     print()
     title = "Suite health"

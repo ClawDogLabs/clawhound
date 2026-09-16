@@ -56,10 +56,10 @@ import json
 import os
 import sys
 
-from recommend_lib.parsing import load_records
+from recommend_lib.parsing import load_records, rec_model
 from recommend_lib.aggregate import aggregate, aggregate_tests, aggregate_by_category
-from recommend_lib.routing import load_category_labels, recommend
-from recommend_lib.cli import print_report, print_health, print_routing
+from recommend_lib.routing import load_category_labels, recommend, benchmark_deltas
+from recommend_lib.cli import print_report, print_health, print_routing, print_benchmark
 from recommend_lib.report import render_html
 from recommend_lib.selftest import _selftest
 
@@ -84,6 +84,19 @@ def main():
                          "choose. The bar itself is unchanged.")
     ap.add_argument("--incumbent", default=None,
                     help="provider:model you run today, marked 'you are here'")
+    ap.add_argument("--compare", default=None,
+                    help="comma-separated provider:model ids to focus the report on, "
+                         "used together with --incumbent as the benchmark. Filters "
+                         "everything (the model table, frontier charts, routing, "
+                         "suite health) down to just the incumbent plus these, and "
+                         "adds a benchmark delta table up top: each compare model's "
+                         "disc score, cost, and latency stated as a percent vs the "
+                         "incumbent, not just the raw numbers side by side. For the "
+                         "'a new model shipped, should I upgrade from what I run "
+                         "today' question, or 'how does my pick compare to similar-"
+                         "tier alternatives across vendors' - a focused view instead "
+                         "of the full field. An id not present in the results is "
+                         "skipped with a warning, not a hard error.")
     ap.add_argument("--top-n", type=int, default=8,
                     help="show the top N models (by floor) as individual dots on the "
                          "frontier charts; collapse the rest into one gray '+X more' "
@@ -115,6 +128,25 @@ def main():
     records = load_records(args.results)
     if not records:
         sys.exit("no evaluation records found in " + args.results)
+
+    compare_ids = None
+    if args.compare:
+        if not args.incumbent:
+            ap.error("--compare requires --incumbent (the benchmark model)")
+        present = {rec_model(r) for r in records}
+        if args.incumbent not in present:
+            sys.exit("--incumbent " + args.incumbent + " not found in results")
+        requested = [c.strip() for c in args.compare.split(",") if c.strip()]
+        missing = [c for c in requested if c not in present]
+        if missing:
+            print("Warning: not present in results, skipped: " + ", ".join(missing),
+                  file=sys.stderr)
+        compare_ids = [c for c in requested if c in present]
+        if not compare_ids:
+            sys.exit("none of the --compare models are present in results")
+        scope = {args.incumbent} | set(compare_ids)
+        records = [r for r in records if rec_model(r) in scope]
+
     # The graded judge is pinned in the config; read it so the run-cost panel can
     # estimate grading spend (promptfoo does not price grading itself).
     judge_id = None
@@ -136,11 +168,17 @@ def main():
                   latency_ceiling=args.latency_ceiling)
     print_health(tests, layered)
 
+    deltas = None
+    if compare_ids:
+        deltas = benchmark_deltas(agg, args.incumbent, compare_ids)
+        print_benchmark(args.incumbent, compare_ids, deltas)
+
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(render_html(agg, layered, args.bar, args.disc_bar, rec,
                             args.incumbent, tests, cat_aggs, categorized, args.optimize,
                             records=records, labels=labels, judge_id=judge_id,
-                            top_n=args.top_n, latency_ceiling=args.latency_ceiling))
+                            top_n=args.top_n, latency_ceiling=args.latency_ceiling,
+                            compare_ids=compare_ids, deltas=deltas))
     print("\nHTML report: " + args.out)
 
 

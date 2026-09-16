@@ -249,6 +249,43 @@ def everyday_pick(owner_route, optimize, agg):
     return best
 
 
+# ----------------------------------------------------------------------------
+# Benchmark comparison: an incumbent (the benchmark model) vs up to a few named
+# challengers, expressed as cost/latency/disc DELTAS rather than raw numbers -
+# "should I switch from what I run today" reads off a percent, not a table of
+# absolute figures the reader has to subtract in their head.
+# ----------------------------------------------------------------------------
+
+def benchmark_deltas(agg, incumbent, compare_ids):
+    """Cost/latency/disc deltas for each compare model vs the incumbent
+    (the benchmark), in compare_ids order.
+
+    Returns a list of dicts: {"model": id, "cost_pct": float or None,
+    "latency_pct": float or None, "disc_delta": float or None}. Positive
+    cost_pct/latency_pct means the compare model is MORE expensive/SLOWER
+    than the benchmark; positive disc_delta means it scores HIGHER. A None
+    field means the incumbent or the compare model is missing that metric -
+    not a real zero delta, so callers must render "n/a", never treat it as 0%.
+    """
+    inc = agg.get(incumbent)
+    out = []
+    for cid in compare_ids:
+        s = agg.get(cid)
+        row = {"model": cid, "cost_pct": None, "latency_pct": None, "disc_delta": None}
+        if inc and s:
+            ic, cc = inc.get("cost_per_test"), s.get("cost_per_test")
+            if ic is not None and cc is not None and ic > 0:
+                row["cost_pct"] = (cc / ic - 1) * 100
+            il, cl = inc.get("latency_s"), s.get("latency_s")
+            if il is not None and cl is not None and il > 0:
+                row["latency_pct"] = (cl / il - 1) * 100
+            idisc, cdisc = inc.get("disc"), s.get("disc")
+            if idisc is not None and cdisc is not None:
+                row["disc_delta"] = cdisc - idisc
+        out.append(row)
+    return out
+
+
 def category_floor_failures(records):
     """{category: [(model, test, fails, runs), ...]} DEDUPED per (model, test).
 

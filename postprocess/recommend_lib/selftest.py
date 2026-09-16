@@ -4,11 +4,11 @@ shaped records that exercise the suite-health block. Run with `--selftest`."""
 from .aggregate import aggregate, aggregate_tests, aggregate_by_category, suite_health
 from .routing import (
     recommend, route_by_category, owner_routing, everyday_pick, dual_routing,
-    exceeds_latency_ceiling,
+    exceeds_latency_ceiling, benchmark_deltas,
 )
 from .charts import _frontier_ylo
 from .report import render_html
-from .cli import print_report, print_routing, print_health
+from .cli import print_report, print_routing, print_health, print_benchmark
 
 
 def _sample_records():
@@ -327,4 +327,41 @@ def _selftest():
     assert "exceeds your 90s latency ceiling" in doc_ceiling, \
         "latency-ceiling warning missing from HTML"
     assert "100%" in doc_ceiling, "slow model's real floor score must still be shown"
+
+    # --- benchmark comparison: opus is the incumbent, haiku and sonnet are the
+    # challengers. haiku is cheaper (-90%), slower (+500%), and weaker on disc
+    # (opus 0.815 avg vs haiku 0.51 avg = -0.305). sonnet has only one record
+    # (no discriminating layer at all here), so its disc delta must be None,
+    # not a false 0 - a missing metric is not a real zero delta. ------------
+    bd = benchmark_deltas(agg, "anthropic:opus", ["anthropic:haiku", "anthropic:sonnet"])
+    assert len(bd) == 2, bd
+    haiku_row, sonnet_row = bd
+    assert haiku_row["model"] == "anthropic:haiku", haiku_row
+    assert abs(haiku_row["cost_pct"] - -90.0) < 1e-6, haiku_row
+    assert abs(haiku_row["latency_pct"] - 500.0) < 1e-6, haiku_row
+    assert abs(haiku_row["disc_delta"] - -0.305) < 1e-6, haiku_row
+    assert sonnet_row["model"] == "anthropic:sonnet", sonnet_row
+    assert abs(sonnet_row["cost_pct"] - -50.0) < 1e-6, sonnet_row
+    assert abs(sonnet_row["latency_pct"] - 11900.0) < 1e-6, sonnet_row
+    assert sonnet_row["disc_delta"] is None, sonnet_row  # sonnet has no disc data at all
+
+    # a compare id absent from agg entirely must return all-None deltas, not raise.
+    bd_missing = benchmark_deltas(agg, "anthropic:opus", ["anthropic:nonexistent"])
+    assert bd_missing == [{"model": "anthropic:nonexistent", "cost_pct": None,
+                           "latency_pct": None, "disc_delta": None}], bd_missing
+
+    print_benchmark("anthropic:opus", ["anthropic:haiku", "anthropic:sonnet"], bd)
+
+    doc_bench = render_html(agg, layered, 1.0, 0.0, rec, "anthropic:opus", tests,
+                            cat_aggs, categorized, records=records,
+                            compare_ids=["anthropic:haiku", "anthropic:sonnet"], deltas=bd)
+    assert "Benchmark comparison" in doc_bench, "benchmark section missing from HTML"
+    assert "-90%" in doc_bench, "haiku cost delta missing from HTML"
+    assert "+500%" in doc_bench, "haiku latency delta missing from HTML"
+    # a report with no compare_ids must render no benchmark section at all.
+    doc_nobench = render_html(agg, layered, 1.0, 0.0, rec, "anthropic:opus", tests,
+                              cat_aggs, categorized, records=records)
+    assert "Benchmark comparison" not in doc_nobench, \
+        "benchmark section must be absent when no --compare is given"
+
     print("\nselftest: OK")

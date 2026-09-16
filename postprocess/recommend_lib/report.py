@@ -287,6 +287,31 @@ def _model_table(agg, winner, incumbent, latency_ceiling=None):
     return "".join(out)
 
 
+def _benchmark_html(incumbent, compare_ids, deltas):
+    """Explicit cost/latency/disc DELTA table, each compare model vs the
+    incumbent (the benchmark) - the focused "should I switch" view. Deltas
+    only, no raw numbers: the all-models table below already has those."""
+    esc = html.escape
+    inc_display = esc(fmt_model_name(incumbent))
+    parts = ['<h2>Benchmark comparison</h2>',
+             '<p class="lens-note">Benchmark: <b>{inc}</b>. Positive cost/'
+             'latency is worse (more expensive/slower than the benchmark); '
+             'positive disc is better (higher quality).</p>'.format(inc=inc_display),
+             '<table class="routing"><thead><tr><th class="l">model</th>'
+             '<th class="l">cost vs benchmark</th><th class="l">latency vs benchmark</th>'
+             '<th class="l">disc vs benchmark</th></tr></thead><tbody>']
+    for cid, d in zip(compare_ids, deltas):
+        name = esc(fmt_model_name(cid))
+        cost_s = "n/a" if d["cost_pct"] is None else "{:+.0f}%".format(d["cost_pct"])
+        lat_s = "n/a" if d["latency_pct"] is None else "{:+.0f}%".format(d["latency_pct"])
+        disc_s = "n/a" if d["disc_delta"] is None else "{:+.2f}".format(d["disc_delta"])
+        parts.append('<tr><td class="l"><span class="mdl">{n}</span></td>'
+                     '<td class="l">{c}</td><td class="l">{l}</td>'
+                     '<td class="l">{d}</td></tr>'.format(n=name, c=cost_s, l=lat_s, d=disc_s))
+    parts.append('</tbody></table>')
+    return "".join(parts)
+
+
 def _owner_summary_html(lead_route, route_cost, route_lat, everyday, labels, optimize):
     """Always-visible, plain-language routing summary an owner can read.
 
@@ -651,7 +676,8 @@ def _run_cost_html(records, judge_id=None):
 
 def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None,
                 cat_aggs=None, categorized=False, optimize="cost", records=None,
-                labels=None, judge_id=None, top_n=8, latency_ceiling=None):
+                labels=None, judge_id=None, top_n=8, latency_ceiling=None,
+                compare_ids=None, deltas=None):
     esc = html.escape
     labels = labels or {}
     cat_aggs = cat_aggs if cat_aggs is not None else {}
@@ -709,6 +735,8 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
     runcost = _run_cost_html(records or [], judge_id)
     db = ("" if disc_bar <= 0
           else ", disc score at or above {:.2f}".format(disc_bar))
+    benchmark = (_benchmark_html(incumbent, compare_ids, deltas)
+                if (incumbent and compare_ids) else "")
 
     return """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -723,6 +751,7 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
 <h1>Which model to run</h1>
 {owner}
 {note}
+{benchmark}
 <h2>Cost and latency vs quality</h2>
 {frontiers}
 <h2>All models at a glance</h2>
@@ -742,6 +771,6 @@ def render_html(agg, layered, bar, disc_bar, rec_model_id, incumbent, tests=None
 <script>{script}</script>
 </body></html>""".format(
         css=_REPORT_CSS, owner=owner, note=note, frontiers=frontiers,
-        dual_table=dual_table, overall_table=overall_table,
+        dual_table=dual_table, overall_table=overall_table, benchmark=benchmark,
         drilldown=drilldown, health=health, barp=bar * 100, db=db,
         runcost=runcost, script=_REPORT_JS)
