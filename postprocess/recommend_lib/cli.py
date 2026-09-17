@@ -26,6 +26,8 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
             mk += "†"
         if exceeds_latency_ceiling(s, latency_ceiling):
             mk += "‡"
+        if s.get("error_n") or 0:
+            mk += "§"
         return mk
     display_names = {m: fmt_model_name(m) + _marker(s) for m, s in rows}
     name_w = max([len("model")] + [len(display_names[m]) for m, _ in rows]) + 2
@@ -37,6 +39,7 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
     ctx_warned = []
     refused_warned = []
     slow_warned = []
+    error_warned = []
     for m, s in rows:
         cpt = s["cost_per_test"]
         mark = ""
@@ -55,6 +58,9 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
             refused_warned.append((fmt_model_name(m), refused_n))
         if exceeds_latency_ceiling(s, latency_ceiling):
             slow_warned.append((fmt_model_name(m), s.get("latency_s")))
+        error_n = s.get("error_n") or 0
+        if error_n:
+            error_warned.append((fmt_model_name(m), error_n, s.get("n") or 0, s.get("errors") or {}))
     print()
     if ctx_warned:
         for name, n in ctx_warned:
@@ -75,6 +81,13 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
                   "practice on your current setup; treat it as exploratory only, or as a "
                   "case for a faster inference stack."
                   .format(name, fmt_latency(lat), latency_ceiling))
+        print()
+    if error_warned:
+        for name, n, total, errors in error_warned:
+            msgs = ", ".join('"{}" ({}x)'.format(msg, cnt) for msg, cnt in errors.items())
+            print("§ {}: {}/{} tests never got graded, an infrastructure error, not a wrong "
+                  "answer: {}. Floor/disc above reflect only the tests that DID grade."
+                  .format(name, n, total, msgs))
         print()
     if not layered:
         print("Note: tests were not tagged by layer, so floor = overall pass-rate "

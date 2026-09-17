@@ -14,7 +14,7 @@ score as discriminating, and says so.
 
 from .parsing import (
     rec_model, rec_layer, rec_category, rec_test_key, rec_cost, rec_latency,
-    rec_completion_tokens, rec_context_exhausted, rec_refused,
+    rec_completion_tokens, rec_context_exhausted, rec_refused, rec_error,
     rec_cost_unreliable, _median,
 )
 
@@ -77,16 +77,27 @@ def aggregate(records):
             "latencies": [],
             "ctx_exhausted_n": 0,
             "refused_n": 0,
+            "error_n": 0,
+            "errors": {},
         })
         a["n"] += 1
         if rec_context_exhausted(r):
             a["ctx_exhausted_n"] += 1
         if rec_refused(r):
             a["refused_n"] += 1
+        err = rec_error(r)
+        if err:
+            a["error_n"] += 1
+            a["errors"][err] = a["errors"].get(err, 0) + 1
         layer = rec_layer(r)
         success = bool(r.get("success"))
         score = r.get("score")
-        if layered:
+        # An errored record (provider or grading call threw) never reflects a
+        # real graded outcome - it must not dilute floor_rate/disc toward a
+        # false "the model failed" when the truth is "this was never graded".
+        if err:
+            pass
+        elif layered:
             if layer == "floor":
                 a["floor_n"] += 1
                 a["floor_pass"] += 1 if success else 0
@@ -136,6 +147,8 @@ def aggregate(records):
             "n": a["n"],
             "ctx_exhausted_n": a["ctx_exhausted_n"],
             "refused_n": a["refused_n"],
+            "error_n": a["error_n"],
+            "errors": a["errors"],
         }
     return out, layered
 

@@ -245,12 +245,15 @@ def _model_table(agg, winner, incumbent, latency_ceiling=None):
         ctx_n = s.get("ctx_exhausted_n") or 0
         refused_n = s.get("refused_n") or 0
         too_slow = exceeds_latency_ceiling(s, latency_ceiling)
-        # Three distinct no-good-answer-in-practice modes, never conflated: a
+        error_n = s.get("error_n") or 0
+        # Four distinct no-good-answer-in-practice modes, never conflated: a
         # budget problem (ctx_n, burned the whole generation on hidden
         # reasoning), a provider safety/content-filter block (refused_n, not
-        # a budget or correctness problem at all), and a model that is
-        # CORRECT but too slow to run in practice (too_slow) - a real,
-        # distinct verdict, not a data-quality problem.
+        # a budget or correctness problem at all), a model that is CORRECT
+        # but too slow to run in practice (too_slow, a real, distinct verdict,
+        # not a data-quality problem), and an infrastructure error (error_n,
+        # the test never got graded at all, e.g. the judge had no API key -
+        # this is not a data point about the model one way or the other).
         notes = []
         if ctx_n:
             notes.append(('failed to finish {n} test{ss} within the allotted context/thinking '
@@ -265,8 +268,14 @@ def _model_table(agg, winner, incumbent, latency_ceiling=None):
                     'floor and disc scores are real, but not fast enough to run in '
                     'practice on your current setup').format(
                         lat=fmt_latency(lat_v), ceil=latency_ceiling))
+        if error_n:
+            err_msgs = "; ".join(s.get("errors") or {})
+            notes.append(('{n} test{ss} never got graded, an infrastructure error, not a '
+                    'wrong answer ({msgs}). Floor/disc above reflect only the tests that '
+                    'DID grade').format(n=error_n, ss="" if error_n == 1 else "s", msgs=err_msgs))
         if notes:
-            marker = ("*" if ctx_n else "") + ("†" if refused_n else "") + ("‡" if too_slow else "")
+            marker = (("*" if ctx_n else "") + ("†" if refused_n else "")
+                      + ("‡" if too_slow else "") + ("§" if error_n else ""))
             name_html = ('<span class="ctx-warn" title="{note}">{display_m}{marker}'
                         '</span>').format(note=esc("; ".join(notes)),
                                           display_m=esc(fmt_model_name(m)), marker=marker)

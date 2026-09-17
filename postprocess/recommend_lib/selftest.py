@@ -119,6 +119,37 @@ def _sample_records():
     # is exactly what proves the ceiling gate does something: without a
     # ceiling this model SHOULD win on cost; with one, it must not. ----------
     recs.append(rec("anthropic:slowmodel", "isolated floor probe", "floor", True, 1.0, 0.0, "hardware", 95000))
+
+    # --- grading/infrastructure error case: the judge (or provider) call
+    # itself threw - e.g. "Google API key is not set" - so these tests never
+    # got graded at all. This is NOT a wrong answer and must never dilute
+    # floor_rate/disc toward looking like a real failure: one genuinely
+    # graded floor pass, plus two discriminating-layer records that both
+    # errored, isolated to their own model id and category so they cannot
+    # perturb any other assertion in this fixture set. -------------------
+    recs.append({
+        "provider": {"id": "anthropic:erroredmodel"},
+        "testCase": {"description": "genuinely graded floor case", "metadata": {"layer": "floor", "category": "erroneous"}},
+        "success": True, "score": 1.0, "cost": 0.01, "latencyMs": 800,
+        "response": {"output": "a real, correctly graded answer"},
+        "tokenUsage": {"prompt": 50, "completion": 20, "total": 70},
+    })
+    recs.append({
+        "provider": {"id": "anthropic:erroredmodel"},
+        "testCase": {"description": "grading infra failure probe one", "metadata": {"layer": "discriminating", "category": "erroneous"}},
+        "success": False, "score": 0, "cost": 0.01, "latencyMs": 600,
+        "response": {"output": "a real answer that was never graded"},
+        "tokenUsage": {"prompt": 50, "completion": 15, "total": 65},
+        "error": "Google API key is not set",
+    })
+    recs.append({
+        "provider": {"id": "anthropic:erroredmodel"},
+        "testCase": {"description": "grading infra failure probe two", "metadata": {"layer": "discriminating", "category": "erroneous"}},
+        "success": False, "score": 0, "cost": 0.01, "latencyMs": 620,
+        "response": {"output": "another real answer that was never graded"},
+        "tokenUsage": {"prompt": 48, "completion": 14, "total": 62},
+        "error": "Google API key is not set",
+    })
     return recs
 
 
@@ -375,5 +406,32 @@ def _selftest():
                               cat_aggs, categorized, records=records)
     assert "Benchmark comparison" not in doc_nobench, \
         "benchmark section must be absent when no --compare is given"
+
+    # --- grading/infrastructure errors: a test that never got graded (the
+    # judge had no API key) must not count as a wrong answer. Only the one
+    # genuinely-graded floor record should feed floor_rate; both errored
+    # discriminating records must be excluded from disc entirely, not
+    # scored as 0. -----------------------------------------------------
+    err_agg = agg["anthropic:erroredmodel"]
+    assert err_agg["error_n"] == 2, err_agg
+    assert err_agg["errors"] == {"Google API key is not set": 2}, err_agg
+    assert err_agg["n"] == 3, err_agg  # all three records still counted as attempts
+    # one genuine floor record, and it passed - errors must not dilute this.
+    assert err_agg["floor_rate"] == 1.0, err_agg
+    # both discriminating records errored, so there is no real disc score at all.
+    assert err_agg["disc"] is None, err_agg
+    # cost/latency reflect the real underlying model calls, which succeeded
+    # even though grading failed - errors do NOT suppress these like a cache
+    # hit does, since the provider call and its cost were genuine.
+    assert abs(err_agg["cost_per_test"] - 0.01) < 1e-9, err_agg
+    assert err_agg["latency_s"] is not None, err_agg
+
+    doc_err = render_html(agg, layered, 1.0, 0.0, rec, "anthropic:opus", tests,
+                          cat_aggs, categorized, records=records)
+    assert 'class="ctx-warn"' in doc_err, "error marker reuses the same warn styling"
+    assert "never got graded" in doc_err, "grading-error note missing from HTML"
+    assert "Google API key is not set" in doc_err, "actual error message missing from HTML"
+    # the one real floor pass must still show through (not hidden by the errors).
+    assert err_agg["floor_rate"] == 1.0
 
     print("\nselftest: OK")

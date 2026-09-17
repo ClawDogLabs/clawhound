@@ -215,6 +215,23 @@ def rec_cost_unreliable(r):
     return (not rec_output_empty(r)) and (ctoks is None or ctoks == 0)
 
 
+def rec_error(r):
+    """The record's top-level `error` string, or None. promptfoo sets this
+    when a test case did not complete normally: a provider call that threw
+    (bad model id, network failure) or a grading/assertion call that threw
+    (most commonly seen: the judge provider has no API key configured, so
+    every llm-rubric/g-eval assertion errors out). Either way this is an
+    INFRASTRUCTURE failure, not a graded answer, and must never be counted
+    as a wrong one - a run where the judge has no key looks identical to a
+    92% failure rate unless this is checked separately, when in truth every
+    one of those models may have answered correctly and simply never got
+    graded. Callers exclude error records from floor/disc scoring entirely
+    (see aggregate()) while still counting real cost/latency from the
+    underlying model call, which can succeed even when grading fails."""
+    err = r.get("error")
+    return err if isinstance(err, str) and err.strip() else None
+
+
 def _median(vals):
     """Median of a list of numbers, or None if empty. Robust to outliers, which
     is why we prefer it over the mean for latency. Note: repeated runs
