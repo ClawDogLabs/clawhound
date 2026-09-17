@@ -216,20 +216,33 @@ def rec_cost_unreliable(r):
 
 
 def rec_error(r):
-    """The record's top-level `error` string, or None. promptfoo sets this
-    when a test case did not complete normally: a provider call that threw
-    (bad model id, network failure) or a grading/assertion call that threw
-    (most commonly seen: the judge provider has no API key configured, so
-    every llm-rubric/g-eval assertion errors out). Either way this is an
-    INFRASTRUCTURE failure, not a graded answer, and must never be counted
-    as a wrong one - a run where the judge has no key looks identical to a
-    92% failure rate unless this is checked separately, when in truth every
-    one of those models may have answered correctly and simply never got
-    graded. Callers exclude error records from floor/disc scoring entirely
-    (see aggregate()) while still counting real cost/latency from the
-    underlying model call, which can succeed even when grading fails."""
+    """The record's top-level `error` string, or None - but ONLY when grading
+    genuinely never happened. promptfoo populates `error` in two situations
+    that look identical at the top level but are opposite outcomes:
+
+    1. A real infrastructure failure: a provider or grading call threw (bad
+       model id, network failure, judge has no API key configured). Here
+       `gradingResult` is absent entirely - no score, no reason, nothing.
+    2. A graded assertion that has an explicit `threshold` and scored below
+       it (e.g. `threshold: 1` on a g-eval that got 0.67): promptfoo copies
+       the failure reason into the top-level `error` field too, but
+       `gradingResult` is fully populated (score, reason, componentResults).
+       This is a REAL graded outcome - a legitimate discriminating failure or
+       floor miss - not an infrastructure problem, and must NOT be excluded
+       from scoring. Doing so silently deletes every failure whose test uses
+       an explicit threshold, which is exactly the tests this tool exists to
+       rank on - it was caught when a full suite of threshold:1 tests came
+       back as a suspicious 100%/1.00 across every single model.
+
+    So: only case 1 counts as an infra error. Case 2 is a normal (failing)
+    grade and is left for floor_pass/disc_sum to handle via success/score."""
     err = r.get("error")
-    return err if isinstance(err, str) and err.strip() else None
+    if not (isinstance(err, str) and err.strip()):
+        return None
+    gr = r.get("gradingResult")
+    if isinstance(gr, dict) and isinstance(gr.get("score"), (int, float)):
+        return None  # grading completed; a threshold miss, not an infra error
+    return err
 
 
 def _median(vals):
