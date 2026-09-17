@@ -28,6 +28,8 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
             mk += "‡"
         if s.get("error_n") or 0:
             mk += "§"
+        if s.get("cache_hit_n") or 0:
+            mk += "¶"
         return mk
     display_names = {m: fmt_model_name(m) + _marker(s) for m, s in rows}
     name_w = max([len("model")] + [len(display_names[m]) for m, _ in rows]) + 2
@@ -40,6 +42,7 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
     refused_warned = []
     slow_warned = []
     error_warned = []
+    cache_warned = []
     for m, s in rows:
         cpt = s["cost_per_test"]
         mark = ""
@@ -61,6 +64,10 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
         error_n = s.get("error_n") or 0
         if error_n:
             error_warned.append((fmt_model_name(m), error_n, s.get("n") or 0, s.get("errors") or {}))
+        cache_n = s.get("cache_hit_n") or 0
+        if cache_n:
+            cache_warned.append((fmt_model_name(m), cache_n, s.get("n") or 0,
+                                  s.get("cost_known"), s.get("latency_known")))
     print()
     if ctx_warned:
         for name, n in ctx_warned:
@@ -85,9 +92,33 @@ def print_report(agg, layered, bar, disc_bar, rec_model_id, incumbent, optimize=
     if error_warned:
         for name, n, total, errors in error_warned:
             msgs = ", ".join('"{}" ({}x)'.format(msg, cnt) for msg, cnt in errors.items())
+            # A high ratio of "errors" for one model is itself a red flag,
+            # independent of cause: a real infra failure (bad key, dead
+            # endpoint) usually wipes out ALL or nearly all of that provider's
+            # calls, not an odd fraction. A moderate, partial ratio like this
+            # is exactly the shape a misclassified graded-failure bug produces
+            # (see rec_error's docstring) - so surface it loudly rather than
+            # let a future regression here go unnoticed the way this one did.
+            caveat = (" VERIFY THIS: that ratio is high enough that these may "
+                      "be real graded failures misclassified as errors, not "
+                      "genuine infrastructure failures - check that each "
+                      "message above is a thrown exception, not a grading "
+                      "reason with a real score attached."
+                      if total and 0 < (n / total) < 0.9 else "")
             print("§ {}: {}/{} tests never got graded, an infrastructure error, not a wrong "
-                  "answer: {}. Floor/disc above reflect only the tests that DID grade."
-                  .format(name, n, total, msgs))
+                  "answer: {}. Floor/disc above reflect only the tests that DID grade.{}"
+                  .format(name, n, total, msgs, caveat))
+        print()
+    if cache_warned:
+        for name, n, total, cost_known, latency_known in cache_warned:
+            fate = ("cost and latency above are both n/a" if not cost_known and not latency_known
+                    else "cost above is n/a" if not cost_known
+                    else "latency above is n/a" if not latency_known
+                    else "cost/latency above are from the remaining fresh calls only")
+            print("¶ {}: {}/{} tests were a promptfoo CACHE REPLAY (an old saved answer reused "
+                  "instead of a fresh API call) - not a failure, floor/disc above are unaffected, "
+                  "but {}. Re-run with --no-cache (or clear promptfoo's cache) for real numbers."
+                  .format(name, n, total, fate))
         print()
     if not layered:
         print("Note: tests were not tagged by layer, so floor = overall pass-rate "

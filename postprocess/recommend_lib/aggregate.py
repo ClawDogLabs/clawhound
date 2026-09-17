@@ -79,6 +79,7 @@ def aggregate(records):
             "refused_n": 0,
             "error_n": 0,
             "errors": {},
+            "cache_hit_n": 0,
         })
         a["n"] += 1
         if rec_context_exhausted(r):
@@ -126,6 +127,16 @@ def aggregate(records):
             a["cost_n"] += 1
         if lat is not None and not cache_hit:
             a["latencies"].append(lat)
+        if cache_hit:
+            # Tracked separately from error_n: a cache hit is not a failure of
+            # any kind (the model answered fine, promptfoo just replayed an
+            # old response instead of calling the API again) - but it means
+            # cost/latency for this record are not real numbers. When EVERY
+            # record for a model is a cache hit, cost_known/latency_known both
+            # end up False ("n/a" in the report) with no cause given unless
+            # this is surfaced - which reads identically to "something broke"
+            # unless a caller explicitly explains it, exactly like error_n.
+            a["cache_hit_n"] += 1
 
     out = {}
     for m, a in models.items():
@@ -149,6 +160,7 @@ def aggregate(records):
             "refused_n": a["refused_n"],
             "error_n": a["error_n"],
             "errors": a["errors"],
+            "cache_hit_n": a["cache_hit_n"],
         }
     return out, layered
 

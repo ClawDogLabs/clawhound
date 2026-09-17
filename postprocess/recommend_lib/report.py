@@ -246,14 +246,20 @@ def _model_table(agg, winner, incumbent, latency_ceiling=None):
         refused_n = s.get("refused_n") or 0
         too_slow = exceeds_latency_ceiling(s, latency_ceiling)
         error_n = s.get("error_n") or 0
-        # Four distinct no-good-answer-in-practice modes, never conflated: a
+        cache_n = s.get("cache_hit_n") or 0
+        # Five distinct no-good-answer-in-practice modes, never conflated: a
         # budget problem (ctx_n, burned the whole generation on hidden
         # reasoning), a provider safety/content-filter block (refused_n, not
         # a budget or correctness problem at all), a model that is CORRECT
         # but too slow to run in practice (too_slow, a real, distinct verdict,
-        # not a data-quality problem), and an infrastructure error (error_n,
+        # not a data-quality problem), an infrastructure error (error_n,
         # the test never got graded at all, e.g. the judge had no API key -
-        # this is not a data point about the model one way or the other).
+        # this is not a data point about the model one way or the other), and
+        # a cache replay (cache_n, not a failure of any kind - the model
+        # answered fine and only cost/latency for that record are unreal,
+        # since promptfoo served an old saved answer instead of calling the
+        # API - without this note, "n/a" cost/latency reads as broken data
+        # collection rather than what it is).
         notes = []
         if ctx_n:
             notes.append(('failed to finish {n} test{ss} within the allotted context/thinking '
@@ -273,9 +279,20 @@ def _model_table(agg, winner, incumbent, latency_ceiling=None):
             notes.append(('{n} test{ss} never got graded, an infrastructure error, not a '
                     'wrong answer ({msgs}). Floor/disc above reflect only the tests that '
                     'DID grade').format(n=error_n, ss="" if error_n == 1 else "s", msgs=err_msgs))
+        if cache_n:
+            cost_known, lat_known = s.get("cost_known"), s.get("latency_known")
+            fate = ("cost and latency are both n/a" if not cost_known and not lat_known
+                    else "cost is n/a" if not cost_known
+                    else "latency is n/a" if not lat_known
+                    else "cost/latency reflect only the remaining fresh calls")
+            notes.append(('{n} test{ss} were a promptfoo cache replay (an old saved answer '
+                    'reused instead of a fresh API call) - not a failure, floor/disc are '
+                    'unaffected, but {fate}. Re-run with --no-cache for real numbers'
+                    ).format(n=cache_n, ss="" if cache_n == 1 else "s", fate=fate))
         if notes:
             marker = (("*" if ctx_n else "") + ("†" if refused_n else "")
-                      + ("‡" if too_slow else "") + ("§" if error_n else ""))
+                      + ("‡" if too_slow else "") + ("§" if error_n else "")
+                      + ("¶" if cache_n else ""))
             name_html = ('<span class="ctx-warn" title="{note}">{display_m}{marker}'
                         '</span>').format(note=esc("; ".join(notes)),
                                           display_m=esc(fmt_model_name(m)), marker=marker)
