@@ -56,6 +56,14 @@ import json
 import os
 import sys
 
+# Windows consoles default stdout/stderr to the system codepage (cp1252),
+# which cannot encode arbitrary Unicode that shows up inside grader messages
+# or test content (e.g. a card-suit symbol). Force UTF-8 with a replacement
+# fallback so a stray character never crashes the report after a full run.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 from recommend_lib.parsing import load_records, rec_model
 from recommend_lib.aggregate import aggregate, aggregate_tests, aggregate_by_category
 from recommend_lib.routing import load_category_labels, recommend, benchmark_deltas
