@@ -77,6 +77,17 @@ Ollama (`http://localhost:11434/v1`), vLLM, LM Studio, or hosted APIs like
 Kimi/Moonshot, Together, and OpenRouter. See the commented block in
 `templates/promptfooconfig.yaml`.
 
+**Local models claim most of a machine's resources, and don't share well.**
+Run a local-model eval in the foreground, one model loaded at a time - never a
+second local model, and never alongside another concurrent eval run, even a
+cloud-only one (a lightweight, network-bound cloud eval can still get killed by
+system-wide memory pressure that has nothing to do with its own footprint, if a
+local model already loaded is eating the machine's RAM). Also drop promptfoo's
+concurrency for a local-model pass (`--filter-providers` down to just that
+provider, plus a low `-j`) - the default "4 at a time" sends multiple
+simultaneous requests to the same already-heavy local model, compounding the
+same problem instead of speeding anything up.
+
 clawhound tests text in, text out, and scores one request against one response.
 Deliberately out of scope: multi-turn autonomy and corrections-per-task (a model
 that wins each item but needs five corrections per task is worse in practice, and

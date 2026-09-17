@@ -26,6 +26,16 @@ providers:
   #   config:
   #     apiBaseUrl: http://localhost:11434/v1
   #     apiKey: ollama
+  #
+  # CAUTION: a local model usually claims most of the machine's RAM/VRAM once
+  # loaded, and does not share well - run it in the foreground, one local model
+  # at a time, never a second local model or another concurrent eval run
+  # alongside it (a lightweight cloud-only eval can still get OOM-killed by
+  # system-wide memory pressure a loaded local model is causing, even though
+  # its own footprint is tiny). For a local-model pass specifically, also drop
+  # concurrency: `promptfoo eval --filter-providers ollama -j 1` - the default
+  # "4 at a time" fires multiple simultaneous requests at the same already-heavy
+  # model instead of actually speeding anything up.
 
 # Point this at your agent's real system + user prompt.
 prompts:
