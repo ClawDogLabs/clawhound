@@ -39,20 +39,39 @@ _MAX_PLAUSIBLE_TOKENS_PER_SEC = 200
 _MIN_PLAUSIBLE_LATENCY_MS = 50
 
 
-def _is_cache_hit(lat, ctoks):
-    """True when a record's latency/token-count combination is the signature
-    of a promptfoo cache replay, not a real inference call: either an
-    implausible tokens/sec ratio (many tokens delivered near-instantly), or
-    latency below any real network+inference round trip (catches a replay
-    that also zeroed the token count, which the tok/s check alone cannot see
-    - 0 tokens over any latency computes to 0 tok/s, under the ceiling). A
-    cache hit's cost (typically 0, no new spend on the replay) and latency
-    (near-zero, no real generation happened) are both artifacts of the
-    replay, not signal about the model's real per-call price or speed -
-    excluded from both stats by every caller of this function. Returns False
-    when latency is unknown (nothing to judge cache-hit-ness from; trust
-    whatever other fields are present rather than guessing).
+def _is_cache_hit(r, lat, ctoks):
+    """True when this record was served from promptfoo's own cache, not a
+    real inference call. Checked two ways, in order:
+
+    1. promptfoo's OWN explicit signal: `response.cached` (or top-level
+       `cached`), when present, is authoritative - trust it directly rather
+       than inferring. This matters because a cache replay does not always
+       look fast: some provider adapters (seen with xAI) replay the ORIGINAL
+       real latency from whenever the response was first cached, rather than
+       reporting near-zero. A latency-based heuristic alone walks right past
+       that shape - three grok models each showed 25/25 records with
+       `response.cached: true` and real multi-second latencies, which the
+       heuristic below would have scored as genuine calls. This is exactly
+       why a suite that got restarted or partially re-run (a prior OOM kill,
+       an earlier attempt at the same suite) can silently poison one
+       provider's numbers while looking completely normal in the report.
+    2. Falls back to the latency/token-count heuristic ONLY when no explicit
+       `cached` field exists on the record at all (older promptfoo versions,
+       or a provider adapter that doesn't set it): an implausible tokens/sec
+       ratio, or latency below any real network+inference round trip (catches
+       a replay that also zeroed the token count, which the tok/s check alone
+       cannot see - 0 tokens over any latency computes to 0 tok/s, under the
+       ceiling).
+
+    A cache hit's cost and latency are both artifacts of the replay, not
+    signal about the model's real per-call price or speed - excluded from
+    both stats by every caller of this function.
     """
+    resp = r.get("response")
+    if isinstance(resp, dict) and "cached" in resp:
+        return bool(resp["cached"])
+    if "cached" in r:
+        return bool(r["cached"])
     if lat is None:
         return False
     if lat < _MIN_PLAUSIBLE_LATENCY_MS:
@@ -115,7 +134,7 @@ def aggregate(records):
                 a["disc_n"] += 1
         lat = rec_latency(r)
         ctoks = rec_completion_tokens(r)
-        cache_hit = _is_cache_hit(lat, ctoks)
+        cache_hit = _is_cache_hit(r, lat, ctoks)
         c = rec_cost(r)
         # cache_hit excludes both cost and latency (neither is real - no
         # generation happened). rec_cost_unreliable excludes cost ONLY - it
