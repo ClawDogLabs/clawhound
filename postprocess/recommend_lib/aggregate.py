@@ -205,6 +205,12 @@ def aggregate_tests(records):
     fall back to `success` too and are left out of both health flags (layer
     stays None), which preserves the untagged-layers fallback: no misleading
     saturation/regression calls when nothing tagged the layers.
+
+    Infrastructure-error records are tracked but excluded from pass/fail
+    counts. They were never graded, so counting promptfoo's `success: false`
+    fallback as a floor failure creates a false regression alarm. An errored
+    discriminating test also stays out of the saturated set: incomplete
+    grading is not evidence that every model passed.
     """
     tests = {}
     for r in records:
@@ -214,6 +220,8 @@ def aggregate_tests(records):
             "layer": layer,
             "n_models": 0,
             "n_passed": 0,
+            "error_n": 0,
+            "errors_by_model": {},
             # Repeated runs (promptfoo --repeat) carry the same (model, test)
             # many times. Count runs and fails PER MODEL so the health view can
             # say "fails 5/5" once instead of printing one line per repeat.
@@ -222,8 +230,12 @@ def aggregate_tests(records):
         })
         if t["layer"] is None and layer is not None:
             t["layer"] = layer
-        t["n_models"] += 1
         model = rec_model(r)
+        if rec_error(r):
+            t["error_n"] += 1
+            t["errors_by_model"][model] = t["errors_by_model"].get(model, 0) + 1
+            continue
+        t["n_models"] += 1
         t["runs_by_model"][model] = t["runs_by_model"].get(model, 0) + 1
         # promptfoo's own success boolean, for every layer - it already
         # incorporates whatever threshold the assertion was configured with.
@@ -251,7 +263,8 @@ def suite_health(tests):
     for key, t in tests.items():
         layer = t["layer"]
         if layer == "discriminating":
-            if t["n_models"] > 0 and t["n_passed"] == t["n_models"]:
+            if (t["n_models"] > 0 and t["n_passed"] == t["n_models"]
+                    and not t.get("error_n")):
                 saturated.append(key)
         elif layer == "floor":
             for m, fails in t["fails_by_model"].items():
