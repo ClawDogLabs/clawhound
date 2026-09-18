@@ -556,10 +556,21 @@ def _suite_health_html(tests, layered):
                      'floor / discriminating tags).</p>')
         return "".join(parts)
     saturated, regressions = suite_health(tests)
+    error_n = sum(t.get("error_n", 0) for t in tests.values())
     if not saturated and not regressions:
-        parts.append('<p class="clean">No issues: no saturated discriminating '
-                     'tests, and every model cleared every floor test.</p>')
+        if error_n:
+            parts.append('<p class="note">No scored suite-health issues. Excluded '
+                         '{n} ungraded result{s} from pass/fail checks; see the '
+                         'model error warnings.</p>'.format(
+                             n=error_n, s=("" if error_n == 1 else "s")))
+        else:
+            parts.append('<p class="clean">No issues: no saturated discriminating '
+                         'tests, and every model cleared every floor test.</p>')
         return "".join(parts)
+    if error_n:
+        parts.append('<p class="note">Excluded {n} ungraded result{s} from '
+                     'pass/fail checks; see the model error warnings.</p>'.format(
+                         n=error_n, s=("" if error_n == 1 else "s")))
     total_models = max((t["n_models"] for t in tests.values()
                         if t["layer"] == "floor"), default=0)
     if regressions:

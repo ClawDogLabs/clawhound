@@ -150,6 +150,28 @@ def _sample_records():
         "tokenUsage": {"prompt": 48, "completion": 14, "total": 62},
         "error": "Google API key is not set",
     })
+    recs.append({
+        "provider": {"id": "anthropic:erroredmodel"},
+        "testCase": {"description": "grading infra floor failure probe", "metadata": {"layer": "floor", "category": "erroneous"}},
+        "success": False, "score": 0, "cost": 0.01, "latencyMs": 610,
+        "response": {"output": "a floor answer that was never graded"},
+        "tokenUsage": {"prompt": 47, "completion": 13, "total": 60},
+        "error": "Google API key is not set",
+    })
+
+    # --- threshold miss: promptfoo also copies a legitimate below-threshold
+    # grading reason into the top-level `error` field. A populated
+    # gradingResult proves grading completed, so this remains a REAL floor
+    # failure and must not be excluded with infrastructure errors. --------
+    recs.append({
+        "provider": {"id": "anthropic:thresholdmodel"},
+        "testCase": {"description": "threshold-missed floor probe", "metadata": {"layer": "floor", "category": "threshold"}},
+        "success": False, "score": 0.4, "cost": 0.01, "latencyMs": 700,
+        "response": {"output": "a graded answer below the configured threshold"},
+        "tokenUsage": {"prompt": 45, "completion": 12, "total": 57},
+        "error": "Score 0.4 is below threshold 1",
+        "gradingResult": {"score": 0.4, "reason": "Missing a required criterion"},
+    })
     return recs
 
 
@@ -173,6 +195,19 @@ def _selftest():
                for m, t, _f, _r in regressions), regressions
     # the all-pass floor test must not appear as a regression
     assert all(t != "odds axiom deflate/inflate" for _m, t, _f, _r in regressions), regressions
+    # An infrastructure error is ungraded, not a floor failure. It remains
+    # visible in the aggregate for transparency but must never raise a false
+    # regression alarm or count as a scored run.
+    err_floor = tests["grading infra floor failure probe"]
+    assert err_floor["error_n"] == 1, err_floor
+    assert err_floor["n_models"] == 0, err_floor
+    assert err_floor["runs_by_model"] == {}, err_floor
+    assert all(t != "grading infra floor failure probe"
+               for _m, t, _f, _r in regressions), regressions
+    # A completed below-threshold grade is not an infrastructure error even
+    # though promptfoo also supplies a top-level `error` string for it.
+    assert any(m == "anthropic:thresholdmodel" and t == "threshold-missed floor probe"
+               for m, t, _f, _r in regressions), regressions
 
     # Refused vs context-exhausted must never cross-contaminate: same empty-
     # output-plus-tokens shape, different cause, different marker.
@@ -413,9 +448,9 @@ def _selftest():
     # discriminating records must be excluded from disc entirely, not
     # scored as 0. -----------------------------------------------------
     err_agg = agg["anthropic:erroredmodel"]
-    assert err_agg["error_n"] == 2, err_agg
-    assert err_agg["errors"] == {"Google API key is not set": 2}, err_agg
-    assert err_agg["n"] == 3, err_agg  # all three records still counted as attempts
+    assert err_agg["error_n"] == 3, err_agg
+    assert err_agg["errors"] == {"Google API key is not set": 3}, err_agg
+    assert err_agg["n"] == 4, err_agg  # all four records still counted as attempts
     # one genuine floor record, and it passed - errors must not dilute this.
     assert err_agg["floor_rate"] == 1.0, err_agg
     # both discriminating records errored, so there is no real disc score at all.
@@ -431,6 +466,10 @@ def _selftest():
     assert 'class="ctx-warn"' in doc_err, "error marker reuses the same warn styling"
     assert "never got graded" in doc_err, "grading-error note missing from HTML"
     assert "Google API key is not set" in doc_err, "actual error message missing from HTML"
+    assert "Excluded 3 ungraded results from pass/fail checks" in doc_err, \
+        "suite-health exclusion note missing from HTML"
+    assert "grading infra floor failure probe" not in [t for _m, t, _f, _r in regressions], \
+        "ungraded floor result must not appear as a regression"
     # the one real floor pass must still show through (not hidden by the errors).
     assert err_agg["floor_rate"] == 1.0
 

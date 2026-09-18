@@ -179,10 +179,20 @@ def print_health(tests, layered):
               "checks were run (they need floor / discriminating tags).")
         return
     saturated, regressions = suite_health(tests)
+    error_n = sum(t.get("error_n", 0) for t in tests.values())
     if not saturated and not regressions:
-        print("No issues: no saturated discriminating tests, and every model "
-              "cleared every floor test.")
+        if error_n:
+            print("No scored suite-health issues. Excluded {} ungraded result{} "
+                  "from pass/fail checks; see the model error warnings."
+                  .format(error_n, "" if error_n == 1 else "s"))
+        else:
+            print("No issues: no saturated discriminating tests, and every model "
+                  "cleared every floor test.")
         return
+    if error_n:
+        print("UNGRADED: excluded {} result{} from pass/fail checks; see the "
+              "model error warnings."
+              .format(error_n, "" if error_n == 1 else "s"))
     for m, test, fails, runs in regressions:
         print('FLOOR FAIL: model {} fails "{}" ({}/{} runs): regression or '
               'coverage gap.'.format(fmt_model_name(m), test, fails, runs))
